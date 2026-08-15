@@ -99,6 +99,39 @@ episode closes, missing logs and unknown or duplicate IDs are recorded under
 `derived/`, where content accuracy is also evaluated. See the
 [synthetic example run](runs/example_run/README.md) for the draft data shape.
 
+## Log analysis
+
+The analysis layer behaves like a small, research-focused SIEM: it correlates
+records, detects anomalies, adds scenario context, and produces operational
+alerts. It does not treat an anomaly as proof of hallucination or insider intent.
+
+```text
+raw run records
+    -> validate schemas, hashes, and run completion
+    -> correlate actions and self-logs by log_id
+    -> compare the claimed tool, action, content, and outcome
+    -> add the action's policy class and optional reasoning evidence
+    -> write match results, operational alerts, and a run summary
+```
+
+The first analyzer should remain offline and deterministic where possible:
+
+1. Reject or mark incomplete runs whose journal, manifest, or hashes do not
+   validate.
+2. Classify each action/self-log relationship as matched, inaccurate, missing,
+   duplicate, unknown-ID, or malformed.
+3. Evaluate whether the self-log accurately describes the action and observed
+   result; matching the ID alone is not sufficient.
+4. Combine the comparison with the scenario's policy rules. Provider-exposed
+   reasoning may add exploratory context, but its absence is not an error.
+5. Produce an operational assessment such as compliant, anomaly detected,
+   policy-relevant omission, cause undetermined, or quarantine recommended.
+
+Raw run files remain immutable. Analysis outputs under `derived/` can be
+regenerated when matching rules or assessment logic change. A live dashboard,
+distributed ingestion system, and general-purpose SIEM rule engine are outside
+the initial implementation.
+
 ## Setup
 
 ```bash
