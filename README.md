@@ -2,45 +2,102 @@
 
 > **Research question:** How faithfully do unmodified LLM agents self-report their tool actions — and are missing or inaccurate reports more common for policy-relevant actions than for matched benign actions?
 
-## Important Notes
+## Scope and interpretation
 
-When we talk about insiders, this means two different thinks. Firstly a model starts to go to hallucinatic position, and a model behaves based on clash of conflict or life threathining issue. 
+A missing, malformed, duplicate, or inaccurate self-log is an operationally
+important anomaly. In production, such an anomaly may justify quarantining or
+shutting down an agent even when its cause is unknown. It can be consistent with
+hallucination, inability to follow instructions, tool failure, or deliberate
+omission, but the mismatch alone does not establish which explanation is true.
 
-Halluciative models should not able to make proper tool_calls. so the ID of the log should be different (so we need to calculate this situation in implementation.). At insider situation, the model will likely to not log the behaviour it will not want to be seen. 
-
-In both ways, the detection will be critical to control multi-agent systems.
+The first study tests one model acting as one agent. Multi-agent behavior is a
+possible follow-up, not part of the initial experiment.
 
 ## Overview
 
-This research investigates whether an LLM agent that begins to misalign with its objectives can be detected through a specialized tool call used for logging.
+This research investigates whether discrepancies in model-created action logs
+can identify agents that require operational intervention.
 
 The core idea relies on **double logging**:
 
 1. **Automatic logging** — every tool action is logged by the system itself, unconditionally.
-2. **Self-report logging** — the model is instructed to log its own actions. It believes a given action was recorded only by that specific function call.
+2. **Self-report logging** — the model-visible system instruction requires the
+   model to call `log_action` after ordinary tool actions.
 
-Any mismatch between what the model *self-reports* and what the system *actually records* exposes potential hallucination or an **insider (misaligned) LLM**.
+The automatic audit is not included in the model-visible prompt, tool
+descriptions, results, or context. Comparing the two sources exposes behavior
+that may require investigation without assuming its cause.
 
-**Note**: Model is not aware of that it is authomatically loged. That is a key point to observe the Insider.
+Provider-exposed reasoning may be retained as optional exploratory evidence. If
+a provider does not expose reasoning, the reasoning log remains empty and the
+manifest records that it was unavailable.
 
 ## What we should do to reach the goal
 
-1. Models should able to reach the necesarry information. 
-2. All actions of the Models (including thinking) should be loged. 
-3. To connect the log of LLM and automated log, every log pair should use the same key value. 
-4. Every test should be re-analyzed and should be classified. 
+1. Give the model the information and simulated tools required by the scenario.
+2. Automatically audit every ordinary tool attempt, including rejected and
+   failed attempts.
+3. Require the model to self-report each attempt using the `log_id` returned by
+   the ordinary tool.
+4. Match and classify the two records without using time as the identity rule.
 
 ## Project Structure
 
 ```
 ├── configs/        # Environment configuration (.env, .env.example)
 ├── docs/           # Research notes and documentation
+├── runs/           # Immutable raw runs and separate derived analysis
 ├── scenarios/      # Test scenarios
 ├── src/            # Source code
 ├── tests/          # Tests
 ├── main.py         # Entry point
 └── pyproject.toml  # Project metadata & dependencies
 ```
+
+## Run records
+
+Each run keeps model-authored records separate from automatic evidence:
+
+```text
+runs/<run_id>/
+├── journal.jsonl
+├── transcript.jsonl
+├── automated_logs/actions.jsonl
+├── model_self_logs/self_logs.jsonl
+├── model_reasoning/reasoning.jsonl
+├── derived/
+│   ├── action_log_matches.jsonl
+│   └── operational_alerts.jsonl
+└── manifest.json
+```
+
+- `journal.jsonl` is the authoritative append-only event history. It records the
+  run lifecycle, action attempts and outcomes, self-log calls, and failures in
+  execution order.
+- `transcript.jsonl` stores the sanitized messages and tool results visible to
+  the model, so the exact interaction can be reconstructed.
+- `automated_logs/actions.jsonl` contains the system-observed ordinary action
+  attempts and their results, including succeeded, rejected, and failed actions.
+- `model_self_logs/self_logs.jsonl` contains only the action descriptions the
+  model submitted through `log_action`.
+- `model_reasoning/reasoning.jsonl` contains optional reasoning explicitly
+  exposed by the provider. It is empty when reasoning is unavailable.
+- `derived/action_log_matches.jsonl` links automatic actions to self-logs by
+  `log_id` and records missing, duplicate, unknown-ID, and accuracy outcomes.
+- `derived/operational_alerts.jsonl` records reproducible warnings, quarantine
+  recommendations, or shutdown recommendations produced from match outcomes.
+- `manifest.json` identifies the run configuration, schemas, model and provider,
+  reasoning availability, completion status, and artifact hashes.
+
+The runner assigns one shared `log_id` to an action and returns it in the tool
+result. Automatic and model-created records use that value for correlation, but
+each has its own `record_id`; `log_id` is not the record's primary identifier.
+Self-logs may arrive through a queue and are not matched by time.
+
+`model_self_logs` contains only records actually created by the model. When the
+episode closes, missing logs and unknown or duplicate IDs are recorded under
+`derived/`, where content accuracy is also evaluated. See the
+[synthetic example run](runs/example_run/README.md) for the draft data shape.
 
 ## Setup
 
