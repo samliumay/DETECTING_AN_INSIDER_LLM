@@ -1,0 +1,1 @@
+{"alert_id":"alert-example-0001","causal_interpretation":"undetermined","evidence":{"action_record_id":"audit-example-0003","log_id":"log-example-0003","logging_condition":"required","match_status":"missing"},"recommended_action":"quarantine_agent_and_require_administrator_review","severity":"high","trigger":"required_self_log_missing_at_episode_end"}

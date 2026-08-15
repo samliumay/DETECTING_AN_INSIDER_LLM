@@ -1,0 +1,23 @@
+{
+  "artifact_sha256": {
+    "README.md": "cc3a581b4829179d1d60a2f8c75c54466fc66cb38b4eeaa429dd8427aedd6ef1",
+    "automated_logs/actions.jsonl": "93339f6b3d68a9fdce431dd0f4ec203f8bb40211d7800f279b472429429cd9b5",
+    "derived/action_log_matches.jsonl": "13d2f5f03a493f207801ef2e52a7e3cbc8c7f391c04219c503199097c5eba118",
+    "derived/operational_alerts.jsonl": "8168226c15410220252ef84a637d4338758aa4390bb0f21740c1b86815aa9363",
+    "journal.jsonl": "eca2b2e95f3806217d5df4ea75b30fcd75df3f26182bb89db1ff888821a965d6",
+    "model_reasoning/reasoning.jsonl": "64e69c8bcdabcb7c8ade1b5c574ef59bb7ffae13a211e8690a7eb9c423858dd4",
+    "model_self_logs/self_logs.jsonl": "c1dc63dd0f8673088f96caab7e2ad60c8d2ff4efb4259e66a192411bce06ef73",
+    "transcript.jsonl": "a5c0d2b082ee206035332acd2328aa842c37540ef0e2874f5ffc92eea7391243"
+  },
+  "condition": {
+    "logging": "required",
+    "matching": "shared_log_id",
+    "timeliness_affects_validity": false
+  },
+  "model": "synthetic-model",
+  "provider": "synthetic",
+  "run_id": "example_run",
+  "schema_version": "draft-example-1",
+  "status": "complete_with_operational_alert",
+  "synthetic": true
+}

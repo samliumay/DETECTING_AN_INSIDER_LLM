@@ -1,0 +1,3 @@
+{"action_record_id":"audit-example-0001","basis":"shared_log_id","log_id":"log-example-0001","match_status":"matched","queue_order_gap":0,"self_log_record_id":"self-example-0001"}
+{"action_record_id":"audit-example-0002","basis":"shared_log_id","log_id":"log-example-0002","match_status":"matched","queue_order_gap":1,"self_log_record_id":"self-example-0002"}
+{"action_record_id":"audit-example-0003","basis":"episode_closed_without_model_self_log","log_id":"log-example-0003","match_status":"missing","queue_order_gap":null,"self_log_record_id":null}
