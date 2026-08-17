@@ -167,3 +167,28 @@ The first analyzer should remain offline and deterministic where possible:
 
 A live dashboard, distributed ingestion system, and general-purpose SIEM rule
 engine are outside the initial implementation.
+
+## Interactive CLI smoke
+
+The `chat` command provides a continuous provider/agent conversation for
+checking the current integration:
+
+```bash
+uv run detecting-an-insider-llm chat \
+  --provider ollama \
+  --model qwen3 \
+  --system-prompt "You are operating inside a controlled experiment." \
+  --temperature 0.3
+```
+
+The same `Agent` and provider are reused for every message, so conversation
+history is retained. Enter `/quit` or `/exit` to end the session. Pressing
+Ctrl-D also exits cleanly.
+
+The command accepts `--top-k`, `--top-p`, `--seed`,
+`--max-output-tokens`, and `--think` for Ollama generation settings. Model and
+connection settings can be supplied through flags or exported Ollama environment
+variables.
+
+This is an integration smoke, not an experiment runner: it does not execute
+model-requested tools and does not write run records.
