@@ -1,0 +1,4 @@
+pydantic
+google-genai
+requests
+ollama

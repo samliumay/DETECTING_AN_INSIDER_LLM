@@ -4,4 +4,23 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pydantic>=2.0,<3",
+    "requests>=2.34,<3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0,<10",
+]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[project.scripts]
+detecting-an-insider-llm = "detecting_an_insider_llm.cli:main"
+
+[tool.uv]
+package = true
