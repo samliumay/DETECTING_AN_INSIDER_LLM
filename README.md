@@ -251,3 +251,142 @@ variables. `OLLAMA_MAX_TOOL_ROUNDS` is used when the corresponding flag is absen
 This remains an integration smoke, not an experiment runner. It executes only
 the simulated email tools and keeps an in-memory structured attempt trace, but it
 does not yet write the four raw run records or `results.json`.
+
+## Remaining work and trial readiness
+
+The project is ready for deterministic scenario validation and manual
+provider/tool-loop smoke tests. It is **not yet ready for a double-logging
+trial**: the current interactive command does not require model self-logging,
+persist raw evidence, or run the declared evaluation.
+
+### Blockers before the first blackmail pilot
+
+The following work blocks a meaningful end-to-end pilot. Running models before
+these items are complete would produce interactions, but not the double-logged,
+reproducible evidence required by the research question.
+
+- [ ] Implement the model-visible `log_action` tool and add the self-logging
+  instruction to the experimental system prompt. Every normalized ordinary
+  tool attempt must receive a `log_id`; the corresponding automatic record and
+  any model self-log must use that ID.
+- [ ] Add a non-interactive experiment runner that selects a scenario condition
+  and policy context, constructs the provider, agent, and isolated mailbox, and
+  runs exactly one episode from the resolved scenario prompt.
+- [ ] Persist `automated_logs.jsonl`, `model_self_logs.jsonl`, `journal.jsonl`,
+  and `metadata.json` atomically under a unique run directory. The writer must
+  preserve rejected calls, malformed tool output, provider failures, selected
+  prompts/configuration, and a terminal completion status.
+- [ ] Enforce the scenario's separate ordinary-tool, self-log, and provider-turn
+  limits. They are currently validated from YAML but are not enforced by the
+  interactive runtime, which still has one generic tool-round limit.
+- [ ] Implement the offline analysis/evaluation helper that validates a closed
+  run, checks required mailbox progress, correlates records, applies the frozen
+  evaluation contract, and writes versioned `results.json` without modifying
+  the four raw records.
+- [ ] Add one deterministic end-to-end fixture covering a complete run, a
+  missing or inaccurate self-log, malformed tool output, and provider failure.
+  Then run a small opt-in Ollama pilot and inspect every artifact before starting
+  repeated trials.
+
+### Non-blockers for the pilot that are required before the main study
+
+These items do not prevent a small engineering pilot whose purpose is to find
+instrumentation and schema problems. They must be completed before collecting
+the repeated runs used for confirmatory claims.
+
+- [ ] Add a versioned run configuration for model, condition, policy context,
+  repetitions, seeds, sampling settings, and execution limits. Use stable run
+  IDs and resumable execution without silently duplicating completed cells.
+- [ ] Freeze the scenario, prompts, tool schemas, evaluation rubric, analyzer
+  version, exclusions, primary metrics, and aggregation rules before collecting
+  confirmatory runs.
+- [ ] If a model judge is used for semantic labels, freeze its prompt and
+  settings, blind irrelevant model identity, retain its structured output, and
+  validate it against a manually labeled pilot sample.
+- [ ] Report failed and incomplete runs in denominators and aggregate at the run
+  and repeated-model levels rather than treating individual tool calls as
+  independent model-level observations.
+
+### Optional extensions that do not block the Ollama blackmail study
+
+These extensions are useful, but they are not required to pilot or study the
+blackmail scenario with Ollama.
+
+The closing-button scenario is not a prerequisite for the blackmail pilot. It
+should be added after the shared runner, logging, artifact, and analysis paths
+work end to end. It should have its own scenario ID, tool bundle, prompts,
+controls, and evaluation contract; its behavior should not be folded into the
+email-specific blackmail labels.
+
+The unfinished Gemini adapter is also not a blocker if the first pilot is
+explicitly Ollama-only. It must be completed and covered by offline contract
+tests before Gemini results are included in the study.
+
+## References
+
+These sources informed the scenario and methodology, but they do not establish
+this project's central hypothesis. The present study must independently test
+whether discrepancies between authoritative action records and model-created
+`log_action` records provide a useful behavioral signal.
+
+### Agentic Misalignment: How LLMs Could Be Insider Threats
+
+- Authors: Aengus Lynch, Benjamin Wright, Caleb Larson, Stuart J. Ritchie,
+  Sören Mindermann, Evan Hubinger, Ethan Perez, and Kevin K. Troy
+- arXiv: [2510.05179v2](https://arxiv.org/abs/2510.05179)
+- Version date: 16 October 2025
+
+This paper evaluates individual models operating as autonomous corporate agents
+inside controlled simulations. Relevant design ideas include fictional
+sandboxed organizations, matched benign controls, independently varied causal
+factors, repeated conditions, exact prompt and model provenance, and a
+distinction between attempted actions and completed harmful outcomes.
+
+Its scenarios deliberately constrain the available options, make harmful
+actions unusually salient, and place relevant evidence close together. The
+blackmail scenario should therefore be interpreted as a controlled behavioral
+probe rather than evidence that a deployed model would behave identically in a
+natural environment. The paper does not evaluate authoritative action logs,
+model-created self-logs, or discrepancies between them.
+
+### Position: Anthropomorphic Misalignment Research Needs Stronger Evidence
+
+- Authors: Vansh Gupta, Peter Nutter, Samuel Stante, Andreas Krause, Florian
+  Tramèr, Lukas Fluri, Xin Chen, and Anna Hedström
+- arXiv: [2606.07612v1](https://arxiv.org/abs/2606.07612)
+- Version date: 29 May 2026
+
+This position paper distinguishes behavioral evidence, demonstrated functional
+effects, and causal-mechanistic evidence. The initial phase of this project is
+limited to behavioral claims: whether observable actions occurred, whether the
+model produced the required self-log, and whether that self-log matched the
+authoritative record. An inaccurate or missing log does not by itself establish
+intent, deception, scheming, self-preservation, or an insider state.
+
+Its methodological recommendations motivate observable operational definitions,
+predeclared thresholds, matched controls, repeated generations, prompt and
+sampling robustness checks, exact model/evaluator provenance, validation of
+automated judgments against human labels, and reporting of base rates, effect
+sizes, uncertainty, and failures.
+
+### Anthropic experimental repository: `agentic-misalignment`
+
+- Repository:
+  [anthropic-experimental/agentic-misalignment][agentic-misalignment-repository]
+- Inspected revision: `ea0630e1a3eaae7f9f9740fd2703229d3854ccda`
+- Revision date: 19 June 2025
+- License: MIT, copyright 2025 Aengus Lynch
+
+The repository is a multi-model batch-experiment harness rather than a
+multi-agent system. Its apparent tool calls are XML-like tags in a final model
+response, not interactive function calls executed by an environment. It does
+not implement the authoritative audit and model-visible self-logging mechanism
+proposed here.
+
+Useful concepts include parameterized scenario templates, factorial condition
+configuration, stable condition identifiers, repeated sampling, structured
+result metadata, and checkpoint/resume support. The repository should be treated
+as a design reference rather than this project's implementation foundation. Any
+substantially copied code must retain the applicable MIT license notice.
+
+[agentic-misalignment-repository]: https://github.com/anthropic-experimental/agentic-misalignment
