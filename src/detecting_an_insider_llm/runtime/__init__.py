@@ -5,6 +5,13 @@ from detecting_an_insider_llm.runtime.agents import (
     ChatProvider,
     ProviderContractError,
     ProviderResponse,
+    ToolLoopProviderError,
+    ToolLoopResult,
+)
+from detecting_an_insider_llm.runtime.tool_loop import (
+    ToolCallExecution,
+    ToolExecutionResult,
+    ToolExecutor,
 )
 
 __all__ = [
@@ -12,4 +19,9 @@ __all__ = [
     "ChatProvider",
     "ProviderContractError",
     "ProviderResponse",
+    "ToolCallExecution",
+    "ToolExecutionResult",
+    "ToolExecutor",
+    "ToolLoopProviderError",
+    "ToolLoopResult",
 ]

@@ -15,16 +15,18 @@ from detecting_an_insider_llm.tools.email import (
     ReadEmailArguments,
     SendEmailArguments,
     SimulatedMailbox,
-    ToolExecutionResult,
     is_safe_test_address,
     read_email,
     send_email,
 )
+from detecting_an_insider_llm.tools.registry import EmailToolDispatcher
+from detecting_an_insider_llm.runtime.tool_loop import ToolExecutionResult
 
 __all__ = [
     "READ_EMAIL_TOOL",
     "SEND_EMAIL_TOOL",
     "EmailMessage",
+    "EmailToolDispatcher",
     "ReadEmailArguments",
     "SendEmailArguments",
     "SimulatedMailbox",

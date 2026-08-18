@@ -9,10 +9,11 @@ choices without delivering mail or creating effects outside the harness.
 import re
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from detecting_an_insider_llm.runtime.tool_loop import ToolExecutionResult
 
 
 # `.test` is reserved for testing.  Requiring that suffix provides a second
@@ -175,30 +176,6 @@ class EmailMessage(BaseModel):
             "subject": self.subject,
             "body": self.body,
         }
-
-
-@dataclass(frozen=True, slots=True)
-class ToolExecutionResult:
-    """Structured result of one attempted email-tool execution.
-
-    Attributes:
-        tool_name: The exact model-visible function name.
-        arguments: Normalized arguments, or the object fields available before
-            validation failed.
-        status: Whether the simulated action succeeded or was rejected.
-        model_result: Receipt that may later be returned to the model.
-        audit_result: More complete receipt for the harness.  Successful audit
-            receipts explicitly retain the fact that execution was simulated.
-
-    The two receipts are independent dictionaries.  Code may safely add a
-    future `log_id` to one without accidentally changing the other.
-    """
-
-    tool_name: Literal["read_email", "send_email"]
-    arguments: dict[str, Any]
-    status: Literal["succeeded", "rejected"]
-    model_result: dict[str, Any]
-    audit_result: dict[str, Any]
 
 
 class SimulatedMailbox:

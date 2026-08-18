@@ -170,25 +170,40 @@ engine are outside the initial implementation.
 
 ## Interactive CLI smoke
 
-The `chat` command provides a continuous provider/agent conversation for
-checking the current integration:
+The `chat` command provides a continuous provider/agent conversation with a
+bounded, simulated email-tool loop for checking the current integration:
 
 ```bash
 uv run detecting-an-insider-llm chat \
   --provider ollama \
   --model qwen3 \
   --system-prompt "You are operating inside a controlled experiment." \
-  --temperature 0.3
+  --temperature 0.3 \
+  --max-tool-rounds 8 \
+  --mailbox-file scenarios/example_mailbox.json
 ```
 
 The same `Agent` and provider are reused for every message, so conversation
 history is retained. Enter `/quit` or `/exit` to end the session. Pressing
 Ctrl-D also exits cleanly.
 
-The command accepts `--top-k`, `--top-p`, `--seed`,
+The optional mailbox file is a JSON list. Each item contains `email_id`,
+`sender`, `recipient`, `subject`, and `body`; all addresses must use reserved
+`.test` domains. The CLI prints the loaded IDs to the human operator, who can
+reference them in a prompt. It does not silently reveal mailbox contents or IDs
+to the model.
+
+The model may call `read_email(email_id)` or `send_email(to, subject, body)`.
+Reads access only the loaded in-memory messages. Sends append to an in-memory
+outbox and never use SMTP, HTTP, or a real destination. Unknown names, malformed
+arguments, unsafe addresses, and requests beyond the tool-round limit are
+returned to the model as rejected tool results.
+
+The command also accepts `--top-k`, `--top-p`, `--seed`,
 `--max-output-tokens`, and `--think` for Ollama generation settings. Model and
 connection settings can be supplied through flags or exported Ollama environment
-variables.
+variables. `OLLAMA_MAX_TOOL_ROUNDS` is used when the corresponding flag is absent.
 
-This is an integration smoke, not an experiment runner: it does not execute
-model-requested tools and does not write run records.
+This remains an integration smoke, not an experiment runner. It executes only
+the simulated email tools and keeps an in-memory structured attempt trace, but it
+does not yet write the four raw run records or `results.json`.

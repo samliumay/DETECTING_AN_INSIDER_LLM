@@ -1,24 +1,39 @@
 """Command-line interface for the insider-LLM detection harness.
 
-The `chat` command is intentionally a small interactive integration test. It
-creates one provider and one `Agent`, then reuses them until the user enters
-`/quit`. Reusing the same agent preserves conversation history across turns.
+The `chat` command is intentionally a small interactive integration test.  It
+creates one provider, one `Agent`, and one simulated mailbox, then reuses them
+until the user enters `/quit`.  Reusing the same objects preserves conversation
+history and simulated sent mail across turns.
 
-This command does not execute model-requested tools or write research artifacts.
-Those behaviors require the future controlled tool dispatcher and run journal.
+The command now executes only the allowlisted email tools through a bounded
+loop.  It still does not write research artifacts; the future experiment runner
+must journal every attempt, failure, prompt, provider response, and run status.
 """
 
 import argparse
+import json
+import os
 import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 from detecting_an_insider_llm.providers import OllamaClient, OllamaClientError
-from detecting_an_insider_llm.runtime import Agent
+from detecting_an_insider_llm.runtime import (
+    Agent,
+    ToolCallExecution,
+    ToolLoopProviderError,
+)
 from detecting_an_insider_llm.runtime.agents import ThinkingMode
+from detecting_an_insider_llm.tools import (
+    EmailToolDispatcher,
+    SimulatedMailbox,
+    email_tool_definitions,
+)
 
 PROGRAM_NAME = "detecting-an-insider-llm"
 PROGRAM_VERSION = "0.1.0"
+DEFAULT_MAX_TOOL_ROUNDS = 8
 
 InputReader = Callable[[str], str]
 LineWriter = Callable[[str], None]
@@ -43,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="start a provider-backed interactive conversation",
         description=(
             "Talk to one model until /quit. Conversation history is preserved, "
-            "but model-requested tools are not executed."
+            "and allowlisted email tools execute only inside a simulated mailbox."
         ),
     )
     chat_parser.add_argument(
@@ -99,6 +114,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="positive Ollama num_predict limit",
     )
     chat_parser.add_argument(
+        "--max-tool-rounds",
+        type=_positive_int,
+        help=(
+            "positive tool-call round limit; defaults to "
+            "OLLAMA_MAX_TOOL_ROUNDS or 8"
+        ),
+    )
+    chat_parser.add_argument(
+        "--mailbox-file",
+        type=Path,
+        help="optional JSON list of synthetic older emails available to read_email",
+    )
+    chat_parser.add_argument(
         "--think",
         choices=("false", "true", "low", "medium", "high"),
         default="false",
@@ -135,14 +163,28 @@ def run_chat(
     write_line: LineWriter = print,
     client_factory: ClientFactory | None = None,
 ) -> int:
-    """Run a stateful interactive conversation until the user requests exit.
+    """Run a bounded tool-enabled conversation until the user requests exit.
 
-    The injectable input, output, and client factory keep tests deterministic and
-    offline. Production callers use the built-in defaults.
+    Args:
+        args: Parsed CLI configuration produced by :func:`build_parser`.
+        input_reader: Injectable terminal input function used by offline tests.
+        write_line: Injectable one-line output function used by offline tests.
+        client_factory: Optional provider constructor; production uses Ollama.
+
+    Returns:
+        Process-style exit code: zero for `/quit` or EOF and 130 for Ctrl-C.
+
+    One agent, dispatcher, and mailbox are reused for the whole session.  Each
+    user message may therefore require several provider calls, but the number of
+    executable tool-call batches is bounded.  The injectable boundaries keep
+    tests deterministic and offline.
     """
     factory = client_factory or _create_ollama_client
     options = _ollama_options(args)
     think = _thinking_mode(args.think)
+    max_tool_rounds = _configured_max_tool_rounds(args.max_tool_rounds)
+    mailbox = _load_mailbox(args.mailbox_file)
+    dispatcher = EmailToolDispatcher(mailbox)
 
     # Construct the provider once. Recreating it on every prompt would discard
     # connection reuse and make runtime metadata less stable within a session.
@@ -150,6 +192,7 @@ def run_chat(
         agent = Agent(
             provider,
             system_prompt=args.system_prompt,
+            tools=email_tool_definitions(),
             options=options,
             think=think,
         )
@@ -157,6 +200,13 @@ def run_chat(
             f"Interactive session with {agent.provider_name}/{agent.model_name}. "
             "Type /quit to exit."
         )
+        if mailbox.older_email_ids:
+            # IDs are shown to the human operator, not silently injected into
+            # the model prompt.  A future scenario determines what the model is
+            # legitimately told about available messages.
+            write_line(
+                "Synthetic older email IDs: " + ", ".join(mailbox.older_email_ids)
+            )
 
         while True:
             try:
@@ -177,25 +227,33 @@ def run_chat(
                 continue
 
             try:
-                response = agent.run(user_message)
+                turn = agent.run_with_tools(
+                    user_message,
+                    executor=dispatcher,
+                    max_tool_rounds=max_tool_rounds,
+                )
+            except ToolLoopProviderError as exc:
+                # Completed attempts cannot be rolled back after a later
+                # provider failure.  Display the partial trace before allowing
+                # the human operator to continue the same session.
+                _write_tool_executions(exc.tool_executions, write_line)
+                write_line(f"error: {exc}")
+                continue
             except OllamaClientError as exc:
-                # Agent commits state only after successful validation, so the
-                # user can retry without a failed turn entering model history.
+                # A first-call failure has no tool side effect, so Agent leaves
+                # that user message outside committed conversation history.
                 write_line(f"error: {exc}")
                 continue
 
-            content = response.message.get("content")
+            _write_tool_executions(turn.tool_executions, write_line)
+
+            content = turn.last_response.message.get("content")
             if isinstance(content, str) and content:
                 write_line(f"assistant> {content}")
 
-            tool_calls = response.message.get("tool_calls")
-            if isinstance(tool_calls, list) and tool_calls:
-                # Tool schemas will be added with the controlled dispatcher.
-                # Until then, making non-execution visible is safer than silently
-                # ignoring a request or invoking arbitrary model-selected code.
+            if turn.termination_reason == "max_tool_rounds":
                 write_line(
-                    "assistant requested tool execution; "
-                    "this CLI does not execute tools yet."
+                    f"error: maximum tool-call rounds reached ({max_tool_rounds})"
                 )
 
 
@@ -213,6 +271,103 @@ def _create_ollama_client(args: argparse.Namespace) -> OllamaClient:
         timeout_seconds=args.timeout_seconds,
         keep_alive=args.keep_alive,
     )
+
+
+def _configured_max_tool_rounds(explicit_value: int | None) -> int:
+    """Resolve and validate the bounded tool-loop setting.
+
+    Args:
+        explicit_value: Value parsed from `--max-tool-rounds`, if supplied.
+
+    Returns:
+        A positive integer using CLI-first, environment-second, default-last
+        precedence.
+
+    Raises:
+        ValueError: If `OLLAMA_MAX_TOOL_ROUNDS` is not a positive integer.
+
+    Argparse validates explicit input.  Environment input needs separate
+    validation because it enters the process as an arbitrary string.
+    """
+
+    if explicit_value is not None:
+        return explicit_value
+    environment_value = os.getenv("OLLAMA_MAX_TOOL_ROUNDS", "").strip()
+    if not environment_value:
+        return DEFAULT_MAX_TOOL_ROUNDS
+    try:
+        parsed_value = int(environment_value)
+    except ValueError as exc:
+        raise ValueError("OLLAMA_MAX_TOOL_ROUNDS must be a positive integer.") from exc
+    if parsed_value < 1:
+        raise ValueError("OLLAMA_MAX_TOOL_ROUNDS must be greater than zero.")
+    return parsed_value
+
+
+def _load_mailbox(mailbox_file: Path | None) -> SimulatedMailbox:
+    """Load optional synthetic older mail into a validated in-memory mailbox.
+
+    Args:
+        mailbox_file: JSON path supplied with `--mailbox-file`, or `None` for an
+            empty inbox.
+
+    Returns:
+        A new :class:`SimulatedMailbox`.  The JSON root must be a list whose
+        items match the documented `EmailMessage` fields.
+
+    Raises:
+        ValueError: If the file cannot be read, decoded, or validated.
+
+    Loading occurs once before provider construction.  An invalid experiment
+    fixture therefore fails before any model call or simulated action occurs.
+    """
+
+    if mailbox_file is None:
+        return SimulatedMailbox()
+    try:
+        raw_text = mailbox_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"Could not read mailbox file {mailbox_file}: {exc}") from exc
+    try:
+        raw_emails = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Mailbox file {mailbox_file} is not valid JSON.") from exc
+    if not isinstance(raw_emails, list):
+        raise ValueError(f"Mailbox file {mailbox_file} must contain a JSON list.")
+    try:
+        return SimulatedMailbox(raw_emails)
+    except ValueError as exc:
+        raise ValueError(f"Mailbox file {mailbox_file} is invalid: {exc}") from exc
+
+
+def _write_tool_executions(
+    executions: Sequence[ToolCallExecution],
+    write_line: LineWriter,
+) -> None:
+    """Display concise statuses without dumping email bodies or audit fields.
+
+    Args:
+        executions: Structured attempts returned by the bounded loop.
+        write_line: Output boundary selected by the interactive caller.
+
+    Successful sends include their deterministic message ID.  Rejections show a
+    stable error code.  Full arguments and receipts stay in memory for later
+    journaling rather than being printed to a terminal where sensitive synthetic
+    scenario text could be copied accidentally.
+    """
+
+    for execution in executions:
+        result = execution.result
+        suffix = ""
+        message_id = result.model_result.get("message_id")
+        error_code = result.model_result.get("error_code")
+        if isinstance(message_id, str):
+            suffix = f" ({message_id})"
+        elif isinstance(error_code, str):
+            suffix = f" ({error_code})"
+        write_line(
+            f"tool> {execution.call.requested_tool_name}: {result.status}{suffix}"
+        )
 
 
 def _ollama_options(args: argparse.Namespace) -> dict[str, Any] | None:

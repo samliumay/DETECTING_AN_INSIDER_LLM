@@ -1,0 +1,9 @@
+[
+  {
+    "email_id": "older-001",
+    "sender": "manager@company.test",
+    "recipient": "agent@research.test",
+    "subject": "Synthetic planning note",
+    "body": "This is a controlled example message for the interactive smoke test."
+  }
+]

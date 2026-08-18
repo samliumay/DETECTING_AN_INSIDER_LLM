@@ -7,16 +7,25 @@ not how a particular API works. Provider adapters, such as `OllamaClient`,
 implement that contract without being imported here. This dependency direction
 allows the same `Agent` to use Ollama, Gemini, or a test double.
 
-This module deliberately stops at one provider turn. A safe research agent also
-needs an allowlisted tool dispatcher, bounded tool rounds, automatic action
-logging, and journaling. Those concerns are kept out of this first component so
-provider selection does not silently grant tool-execution authority.
+The basic :meth:`Agent.run` method still performs one provider turn.  The
+separate :meth:`Agent.run_with_tools` path coordinates a bounded multi-turn loop
+through an injected allowlisted executor.  Parsing and tool-result construction
+live in :mod:`detecting_an_insider_llm.runtime.tool_loop`; concrete email dispatch
+lives in the tools package.  Automatic durable logging remains a later layer.
 """
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
+
+from detecting_an_insider_llm.runtime.tool_loop import (
+    ToolCallExecution,
+    ToolExecutor,
+    execute_tool_call,
+    reject_tool_call_at_round_limit,
+    tool_result_message,
+)
 
 # Provider messages and tool definitions contain nested, provider-defined JSON.
 # Keeping the boundary JSON-shaped avoids leaking an Ollama SDK class into the
@@ -48,6 +57,61 @@ class ProviderResponse:
 
     message: Message
     raw_response: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolLoopResult:
+    """Complete in-memory outcome of one bounded user/tool interaction.
+
+    Attributes:
+        last_response: Last valid provider response, whether it was a normal
+            final answer or an additional tool request stopped by the limit.
+        provider_responses: Every valid provider response produced during this
+            user turn, in call order.  Raw responses remain available for later
+            journaling.
+        tool_executions: Every successful or rejected tool-call attempt in
+            monotonic action order.
+        tool_rounds: Number of rounds in which calls were actually dispatched.
+        termination_reason: `completed` for a normal assistant answer or
+            `max_tool_rounds` when further requested calls were rejected.
+
+    This result is not a durable research artifact.  A later runner must write
+    it, together with provider failures and scenario metadata, to the run journal.
+    """
+
+    last_response: ProviderResponse
+    provider_responses: tuple[ProviderResponse, ...]
+    tool_executions: tuple[ToolCallExecution, ...]
+    tool_rounds: int
+    termination_reason: Literal["completed", "max_tool_rounds"]
+
+
+class ToolLoopProviderError(RuntimeError):
+    """Report provider failure after at least one tool attempt was committed.
+
+    Attributes:
+        provider_responses: Valid responses observed before the failed call.
+        tool_executions: Tool attempts already executed or rejected.
+
+    The original provider exception is preserved as `__cause__`.  Carrying the
+    partial structured trace prevents a caller from losing observed actions just
+    because the provider failed before producing the final assistant message.
+    """
+
+    def __init__(
+        self,
+        provider_error: Exception,
+        *,
+        provider_responses: Sequence[ProviderResponse],
+        tool_executions: Sequence[ToolCallExecution],
+    ) -> None:
+        """Copy partial progress and retain the provider's readable message."""
+
+        super().__init__(str(provider_error))
+        self.provider_responses = tuple(
+            _copy_provider_response(response) for response in provider_responses
+        )
+        self.tool_executions = tuple(deepcopy(tool_executions))
 
 
 class ChatProvider(Protocol):
@@ -100,7 +164,8 @@ class Agent:
             Optional instruction inserted once at the start of the conversation.
         tools:
             Optional provider-facing tool schemas. They are advertised to the
-            model but are not executed by this class.
+            model. :meth:`run` does not execute calls; :meth:`run_with_tools`
+            executes them only through its explicitly supplied executor.
         options:
             Sampling/runtime options forwarded without provider-specific
             interpretation.
@@ -108,10 +173,10 @@ class Agent:
             Whether, or at what supported level, the provider should request
             exposed reasoning.
 
-    This first version performs exactly one provider call per :meth:`run`. It
-    preserves returned tool calls but intentionally does not execute them. Tool
-    execution needs a bounded, allowlisted dispatcher with automatic logging,
-    which belongs in a separate runtime component.
+    :meth:`run` performs exactly one provider call and preserves returned tool
+    calls without executing them. :meth:`run_with_tools` adds bounded execution
+    while keeping the allowlist outside this class.  Neither path writes durable
+    logs; the future experiment runner remains responsible for persistence.
     """
 
     def __init__(
@@ -136,6 +201,7 @@ class Agent:
         self._options = deepcopy(dict(options)) if options is not None else None
         self._think = think
         self._messages = self._initial_messages()
+        self._next_tool_sequence = 1
 
     @property
     def provider_name(self) -> str:
@@ -194,9 +260,135 @@ class Agent:
         self._messages = [*request_messages, assistant_message]
         return response
 
+    def run_with_tools(
+        self,
+        user_message: str,
+        *,
+        executor: ToolExecutor,
+        max_tool_rounds: int,
+    ) -> ToolLoopResult:
+        """Run one user turn through a bounded provider/tool cycle.
+
+        Args:
+            user_message: Nonblank user input appended after committed history.
+            executor: Explicit allowlisted dispatcher for parsed function calls.
+            max_tool_rounds: Positive number of tool-call batches that may
+                execute before later requests are rejected.
+
+        Returns:
+            A :class:`ToolLoopResult` containing provider responses, structured
+            tool attempts, the number of executed rounds, and termination reason.
+
+        Raises:
+            ValueError: If the user message is blank or the round limit is not a
+                positive integer.
+            ToolLoopProviderError: If a provider fails after one or more tool
+                attempts have already been committed.  Partial evidence is
+                attached to the exception.
+            Exception: The original provider exception is allowed to propagate
+                when the first call fails before any tool action exists.
+
+        One tool round may contain several calls.  All calls in that assistant
+        message are handled in list order, then their model receipts are appended
+        as `role="tool"` messages before the provider is called again.  Progress
+        is committed after every tool attempt because an observed action must not
+        disappear if a later provider call fails.
+        """
+
+        if not user_message.strip():
+            raise ValueError("user_message must contain non-whitespace text.")
+        if (
+            isinstance(max_tool_rounds, bool)
+            or not isinstance(max_tool_rounds, int)
+            or max_tool_rounds < 1
+        ):
+            raise ValueError("max_tool_rounds must be a positive integer.")
+
+        working_messages = [
+            *deepcopy(self._messages),
+            {"role": "user", "content": user_message},
+        ]
+        provider_responses: list[ProviderResponse] = []
+        tool_executions: list[ToolCallExecution] = []
+        tool_rounds = 0
+
+        while True:
+            try:
+                response = self._provider.chat(
+                    working_messages,
+                    tools=deepcopy(self._tools),
+                    options=deepcopy(self._options),
+                    think=self._think,
+                )
+                assistant_message = _validated_assistant_message(response)
+            except Exception as exc:
+                # Before any action, the normal one-turn transactional behavior
+                # remains intact and callers receive their provider's exception.
+                if not tool_executions:
+                    raise
+                raise ToolLoopProviderError(
+                    exc,
+                    provider_responses=provider_responses,
+                    tool_executions=tool_executions,
+                ) from exc
+
+            copied_response = _copy_provider_response(response)
+            provider_responses.append(copied_response)
+            working_messages.append(assistant_message)
+            raw_tool_calls = assistant_message.get("tool_calls")
+
+            if not raw_tool_calls:
+                # A normal assistant answer completes the user turn.  This final
+                # commit also covers turns that never requested a tool.
+                self._messages = deepcopy(working_messages)
+                return ToolLoopResult(
+                    last_response=copied_response,
+                    provider_responses=tuple(provider_responses),
+                    tool_executions=tuple(tool_executions),
+                    tool_rounds=tool_rounds,
+                    termination_reason="completed",
+                )
+
+            if tool_rounds >= max_tool_rounds:
+                # These are still observable requests.  Record each as rejected
+                # rather than silently discarding the final assistant tool calls.
+                for raw_tool_call in raw_tool_calls:
+                    execution = reject_tool_call_at_round_limit(
+                        raw_tool_call,
+                        sequence=self._next_tool_sequence,
+                        max_tool_rounds=max_tool_rounds,
+                    )
+                    self._next_tool_sequence += 1
+                    tool_executions.append(execution)
+                    working_messages.append(tool_result_message(execution))
+                    self._messages = deepcopy(working_messages)
+                return ToolLoopResult(
+                    last_response=copied_response,
+                    provider_responses=tuple(provider_responses),
+                    tool_executions=tuple(tool_executions),
+                    tool_rounds=tool_rounds,
+                    termination_reason="max_tool_rounds",
+                )
+
+            tool_rounds += 1
+            for raw_tool_call in raw_tool_calls:
+                execution = execute_tool_call(
+                    raw_tool_call,
+                    sequence=self._next_tool_sequence,
+                    executor=executor,
+                )
+                self._next_tool_sequence += 1
+                tool_executions.append(execution)
+                working_messages.append(tool_result_message(execution))
+
+                # Commit after each attempt.  If another call in the same batch
+                # unexpectedly fails, completed earlier actions remain visible.
+                self._messages = deepcopy(working_messages)
+
     def reset(self) -> None:
-        """Clear prior turns while retaining the configured system prompt."""
+        """Clear turns and action numbering while retaining configuration."""
         self._messages = self._initial_messages()
+        self._next_tool_sequence = 1
 
     def _initial_messages(self) -> list[Message]:
         """Build fresh initial state so reset never reuses mutable messages."""
@@ -234,3 +426,17 @@ def _validated_assistant_message(response: ProviderResponse) -> Message:
         )
 
     return deepcopy(message)
+
+
+def _copy_provider_response(response: ProviderResponse) -> ProviderResponse:
+    """Return a defensive copy of both normalized and raw provider evidence.
+
+    The dataclass itself is frozen, but its dictionaries are not.  Copying at
+    the runtime boundary prevents caller or provider mutations from rewriting a
+    tool-loop trace after it has been returned or attached to an exception.
+    """
+
+    return ProviderResponse(
+        message=deepcopy(response.message),
+        raw_response=deepcopy(response.raw_response),
+    )

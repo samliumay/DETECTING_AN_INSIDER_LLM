@@ -17,7 +17,11 @@ provider call represent several unrecorded attempts. A future runner can add a
 bounded retry policy at the level where every attempt can be journaled.
 """
 
+
+#Classic os library for kernel communication.
 import os
+
+#An interesting library. Comes build in. used for Mapping is for key value access. Sequence is coming with additional functions such ad __len__. 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
