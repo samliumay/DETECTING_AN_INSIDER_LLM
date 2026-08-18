@@ -7,8 +7,9 @@ choices without delivering mail or creating effects outside the harness.
 """
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -55,6 +56,18 @@ class ReadEmailArguments(BaseModel):
         if email_id != email_id.strip():
             raise ValueError("email_id must not start or end with whitespace")
         return email_id
+
+
+class ListEmailsArguments(BaseModel):
+    """Validate the intentionally empty argument object for `list_emails`.
+
+    The tool currently lists every message made available by the scenario, so
+    it accepts no filters or pagination options.  Forbidding extra fields keeps
+    a malformed provider call observable instead of silently changing its
+    meaning.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class SendEmailArguments(BaseModel):
@@ -114,6 +127,7 @@ class EmailMessage(BaseModel):
     )
 
     email_id: str = Field(min_length=1, max_length=128)
+    timestamp: datetime
     sender: str = Field(min_length=3, max_length=254)
     recipient: str = Field(min_length=3, max_length=254)
     subject: str = Field(min_length=1, max_length=998)
@@ -131,6 +145,20 @@ class EmailMessage(BaseModel):
         if not is_safe_test_address(address):
             raise ValueError("mailbox addresses must use a valid .test domain")
         return address
+
+    @field_validator("timestamp")
+    @classmethod
+    def timestamp_must_include_timezone(cls, timestamp: datetime) -> datetime:
+        """Normalize an explicit timestamp to UTC or reject a naive value.
+
+        Chronological mailbox order is part of the scenario manipulation.  A
+        timezone-free timestamp would depend on the machine running the test,
+        so fixtures must state an offset and are normalized to UTC once.
+        """
+
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError("email timestamp must include a timezone offset")
+        return timestamp.astimezone(timezone.utc)
 
     @field_validator("email_id")
     @classmethod
@@ -164,17 +192,35 @@ class EmailMessage(BaseModel):
         """Convert internal field names into the model-facing email object.
 
         Returns:
-            A new dictionary containing `email_id`, `from`, `to`, `subject`,
-            and `body`.  A new object is created each time so callers cannot
-            mutate the immutable canonical message through the returned value.
+            A new dictionary containing `email_id`, `timestamp`, `from`, `to`,
+            `subject`, and `body`.  A new object is created each time so callers
+            cannot mutate the immutable canonical message through the returned
+            value.
         """
 
         return {
             "email_id": self.email_id,
+            "timestamp": _format_utc_timestamp(self.timestamp),
             "from": self.sender,
             "to": self.recipient,
             "subject": self.subject,
             "body": self.body,
+        }
+
+    def as_header_record(self) -> dict[str, str]:
+        """Return model-facing discovery fields without exposing the body.
+
+        The header record lets a model plan which stable IDs to read while
+        preserving the distinction between discovering a message and examining
+        its evidence-bearing contents.
+        """
+
+        return {
+            "email_id": self.email_id,
+            "timestamp": _format_utc_timestamp(self.timestamp),
+            "from": self.sender,
+            "to": self.recipient,
+            "subject": self.subject,
         }
 
 
@@ -184,6 +230,7 @@ class SimulatedMailbox:
     Args:
         older_emails: Scenario-provided messages that `read_email` may access.
         sender_address: Synthetic address assigned to the model-controlled agent.
+        clock: Optional aware-datetime source for timestamping simulated sends.
 
     The class deliberately has no generic `execute(name, arguments)` dispatcher.
     Tool allowlisting, attempt logging, and malformed-call preservation belong
@@ -195,14 +242,17 @@ class SimulatedMailbox:
         older_emails: Sequence[EmailMessage | Mapping[str, Any]] = (),
         *,
         sender_address: str = "agent@research.test",
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         """Create validated inbox state and an initially empty outbox.
 
         Each supplied older message is converted to an immutable
         :class:`EmailMessage` and indexed by `email_id` for deterministic reads.
         Duplicate IDs are rejected because they would make a model's read
-        request ambiguous.  The send counter begins at one for every mailbox,
-        making independent test and experiment runs reproducible.
+        request ambiguous.  Messages are then indexed oldest-first so the list
+        tool has one stable ordering contract.  The send counter begins at one
+        for every mailbox, making independent test and experiment runs
+        reproducible.
 
         Raises:
             ValueError: If the sender is unsafe or an email ID is duplicated.
@@ -212,21 +262,28 @@ class SimulatedMailbox:
         if not is_safe_test_address(sender_address):
             raise ValueError("sender_address must be a valid address in a .test domain.")
 
-        indexed_emails: dict[str, EmailMessage] = {}
+        supplied_emails: list[EmailMessage] = []
+        observed_ids: set[str] = set()
         for raw_email in older_emails:
             email = EmailMessage.model_validate(raw_email)
-            if email.email_id in indexed_emails:
+            if email.email_id in observed_ids:
                 raise ValueError(f"Duplicate older email_id: {email.email_id}.")
-            indexed_emails[email.email_id] = email
+            observed_ids.add(email.email_id)
+            supplied_emails.append(email)
 
-        self._older_emails = indexed_emails
+        # Python's sort is stable, so equal timestamps retain fixture order.
+        # Scenario validation applies a stricter unique-timestamp invariant.
+        ordered_emails = sorted(supplied_emails, key=lambda email: email.timestamp)
+
+        self._older_emails = {email.email_id: email for email in ordered_emails}
         self._sender_address = sender_address
+        self._clock = clock or _current_utc_time
         self._sent_emails: list[EmailMessage] = []
         self._next_sent_sequence = 1
 
     @property
     def older_email_ids(self) -> tuple[str, ...]:
-        """Return readable older-email IDs in their supplied order.
+        """Return readable older-email IDs in chronological order.
 
         A tuple is returned instead of the internal dictionary so callers can
         discover available IDs without adding, removing, or replacing messages.
@@ -246,6 +303,48 @@ class SimulatedMailbox:
         # EmailMessage is frozen, and a tuple prevents append/remove operations.
         # Callers can inspect evidence without mutating the mailbox's outbox.
         return tuple(self._sent_emails)
+
+    def list_emails(self, raw_arguments: object) -> ToolExecutionResult:
+        """List available message headers in chronological order.
+
+        Args:
+            raw_arguments: The model-generated argument object, which must be
+                exactly an empty JSON object.
+
+        Returns:
+            A structured success containing IDs and natural headers but no
+            bodies, or a rejection for malformed/undeclared arguments.
+
+        Listing does not mark mail as read.  Read attempts remain separate,
+        observable calls and messages stay available for reproducible retries.
+        """
+
+        try:
+            request = ListEmailsArguments.model_validate(raw_arguments)
+        except ValidationError as exc:
+            return _rejected_result(
+                tool_name="list_emails",
+                arguments=_object_fields(raw_arguments),
+                message="Invalid list_emails arguments.",
+                error_code="invalid_arguments",
+                validation_error=exc,
+            )
+
+        headers = [email.as_header_record() for email in self._older_emails.values()]
+        model_result: dict[str, Any] = {
+            "ok": True,
+            "count": len(headers),
+            "emails": headers,
+        }
+        audit_result = deepcopy(model_result)
+        audit_result["simulated"] = True
+        return ToolExecutionResult(
+            tool_name="list_emails",
+            arguments=request.model_dump(),
+            status="succeeded",
+            model_result=model_result,
+            audit_result=audit_result,
+        )
 
     def read_email(self, raw_arguments: object) -> ToolExecutionResult:
         """Execute one controlled `read_email` attempt.
@@ -331,6 +430,7 @@ class SimulatedMailbox:
         message_id = f"sent-{self._next_sent_sequence:04d}"
         email = EmailMessage(
             email_id=message_id,
+            timestamp=_validated_clock_time(self._clock()),
             sender=self._sender_address,
             recipient=request.to,
             subject=request.subject,
@@ -358,6 +458,23 @@ class SimulatedMailbox:
             model_result=model_result,
             audit_result=audit_result,
         )
+
+
+def list_emails(
+    raw_arguments: object,
+    mailbox: SimulatedMailbox,
+) -> ToolExecutionResult:
+    """Delegate header discovery to explicitly supplied mailbox state.
+
+    Args:
+        raw_arguments: Model arguments, expected to be an empty object.
+        mailbox: Scenario-specific state whose older headers are listed.
+
+    Returns:
+        The same structured result produced by `mailbox.list_emails`.
+    """
+
+    return mailbox.list_emails(raw_arguments)
 
 
 def read_email(
@@ -427,7 +544,7 @@ def is_safe_test_address(address: str) -> bool:
 
 def _rejected_result(
     *,
-    tool_name: Literal["read_email", "send_email"],
+    tool_name: Literal["list_emails", "read_email", "send_email"],
     arguments: dict[str, Any],
     message: str,
     error_code: str,
@@ -489,3 +606,32 @@ def _object_fields(raw_arguments: object) -> dict[str, Any]:
     if not isinstance(raw_arguments, Mapping):
         return {}
     return deepcopy(dict(raw_arguments))
+
+
+def _current_utc_time() -> datetime:
+    """Return the current aware UTC time for interactive simulated sends.
+
+    Experiment scenarios inject a fixed clock instead.  Keeping wall time
+    behind this small boundary makes deterministic tests and replay possible.
+    """
+
+    return datetime.now(timezone.utc)
+
+
+def _validated_clock_time(timestamp: datetime) -> datetime:
+    """Normalize a clock result to UTC or fail loudly on a naive timestamp.
+
+    A bad injected clock is harness configuration failure, not model behavior,
+    so it raises rather than becoming a rejected model tool call.
+    """
+
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("mailbox clock must return a timezone-aware datetime")
+    return timestamp.astimezone(timezone.utc)
+
+
+def _format_utc_timestamp(timestamp: datetime) -> str:
+    """Serialize an aware timestamp as a stable ISO 8601 UTC string."""
+
+    normalized = _validated_clock_time(timestamp)
+    return normalized.isoformat().replace("+00:00", "Z")

@@ -33,7 +33,10 @@ from detecting_an_insider_llm.tools import (
 
 PROGRAM_NAME = "detecting-an-insider-llm"
 PROGRAM_VERSION = "0.1.0"
-DEFAULT_MAX_TOOL_ROUNDS = 8
+# A fully sequential scenario path can require list + eleven reads + one send,
+# and the later model-visible self-log may add one call per ordinary action.
+# Thirty-two leaves a small retry margin while remaining explicitly bounded.
+DEFAULT_MAX_TOOL_ROUNDS = 32
 
 InputReader = Callable[[str], str]
 LineWriter = Callable[[str], None]
@@ -118,13 +121,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         help=(
             "positive tool-call round limit; defaults to "
-            "OLLAMA_MAX_TOOL_ROUNDS or 8"
+            "OLLAMA_MAX_TOOL_ROUNDS or 32"
         ),
     )
     chat_parser.add_argument(
         "--mailbox-file",
         type=Path,
-        help="optional JSON list of synthetic older emails available to read_email",
+        help="optional JSON list of synthetic emails available to mailbox tools",
     )
     chat_parser.add_argument(
         "--think",

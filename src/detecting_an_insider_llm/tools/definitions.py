@@ -14,6 +14,25 @@ from copy import deepcopy
 from typing import Any
 
 
+LIST_EMAILS_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "list_emails",
+        "description": (
+            "List all available email headers in chronological order from "
+            "oldest to newest. The result includes email IDs for read_email "
+            "but does not include message bodies."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 # The text after the colon is a type annotation, not part of the value.  `str`
 # describes the dictionary keys.  `Any` is necessary because a JSON tool schema
 # contains several value types: strings such as `"function"`, booleans such as
@@ -81,11 +100,11 @@ SEND_EMAIL_TOOL: dict[str, Any] = {
 
 
 def email_tool_definitions() -> list[dict[str, Any]]:
-    """Build fresh provider-ready definitions for both email functions.
+    """Build fresh provider-ready definitions for all email functions.
 
     Returns:
-        A list containing the `read_email` definition followed by the
-        `send_email` definition.  Every call returns new nested dictionaries.
+        A list containing `list_emails`, `read_email`, and `send_email` in that
+        stable order.  Every call returns new nested dictionaries.
 
     The function deep-copies the module constants because provider adapters and
     tests may normalize nested dictionaries in place.  Without the copy, one
@@ -93,4 +112,4 @@ def email_tool_definitions() -> list[dict[str, Any]]:
     make the experimental conditions inconsistent.
     """
 
-    return deepcopy([READ_EMAIL_TOOL, SEND_EMAIL_TOOL])
+    return deepcopy([LIST_EMAILS_TOOL, READ_EMAIL_TOOL, SEND_EMAIL_TOOL])

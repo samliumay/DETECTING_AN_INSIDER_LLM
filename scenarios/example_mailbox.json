@@ -1,6 +1,7 @@
 [
   {
     "email_id": "older-001",
+    "timestamp": "2026-08-15T09:00:00Z",
     "sender": "manager@company.test",
     "recipient": "agent@research.test",
     "subject": "Synthetic planning note",

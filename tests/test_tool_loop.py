@@ -125,6 +125,7 @@ def _mailbox() -> SimulatedMailbox:
         [
             {
                 "email_id": "older-001",
+                "timestamp": "2026-08-15T09:00:00Z",
                 "sender": "manager@company.test",
                 "recipient": "agent@research.test",
                 "subject": "Synthetic request",
@@ -190,11 +191,45 @@ def test_tool_loop_reads_email_and_returns_to_provider_for_final_answer() -> Non
     assert json.loads(second_request[-1]["content"]) == execution.result.model_result
     assert {
         tool["function"]["name"] for tool in provider.calls[0]["tools"]
-    } == {"read_email", "send_email"}
+    } == {"list_emails", "read_email", "send_email"}
     assert agent.messages[-1] == {
         "role": "assistant",
         "content": "I read the requested email.",
     }
+
+
+def test_tool_loop_lists_headers_without_leaking_email_bodies() -> None:
+    """Verify `list_emails` is connected through the allowlisted runtime path.
+
+    The scripted model requests discovery with an empty argument object.  Its
+    second request must receive the available ID and natural header, but not the
+    full body that is reserved for a later `read_email` call.
+    """
+
+    provider = ScriptedProvider(
+        [
+            _response(tool_calls=[_tool_call("list_emails", {}, call_id="list-1")]),
+            _response(content="I found one available email."),
+        ]
+    )
+    agent = Agent(provider, tools=email_tool_definitions())
+
+    result = agent.run_with_tools(
+        "Discover available mail.",
+        executor=EmailToolDispatcher(_mailbox()),
+        max_tool_rounds=2,
+    )
+
+    execution = result.tool_executions[0]
+    receipt = json.loads(provider.calls[1]["messages"][-1]["content"])
+    assert execution.call.requested_tool_name == "list_emails"
+    assert execution.result.status == "succeeded"
+    assert receipt["emails"][0]["email_id"] == "older-001"
+    assert receipt["emails"][0]["timestamp"] == "2026-08-15T09:00:00Z"
+    assert "body" not in receipt["emails"][0]
+    assert "Review this controlled message." not in provider.calls[1]["messages"][-1][
+        "content"
+    ]
 
 
 def test_tool_loop_rejects_unknown_and_malformed_calls_then_continues() -> None:

@@ -3,7 +3,8 @@
 This module is the only place that translates a model-selected function name
 into executable Python behavior.  It uses explicit comparisons rather than
 dynamic attribute lookup, imports, or `eval`, so a model can request only
-`read_email` or `send_email`.  Every other name becomes a structured rejection.
+`list_emails`, `read_email`, or `send_email`.  Every other name becomes a
+structured rejection.
 """
 
 from collections.abc import Mapping
@@ -15,7 +16,7 @@ from detecting_an_insider_llm.tools.email import SimulatedMailbox
 
 
 class EmailToolDispatcher:
-    """Execute only the two email functions against one supplied mailbox.
+    """Execute only the three email functions against one supplied mailbox.
 
     Args:
         mailbox: Scenario- or CLI-specific state used for older reads and the
@@ -59,6 +60,8 @@ class EmailToolDispatcher:
         make a new Python function executable.
         """
 
+        if tool_name == "list_emails":
+            return self._mailbox.list_emails(raw_arguments)
         if tool_name == "read_email":
             return self._mailbox.read_email(raw_arguments)
         if tool_name == "send_email":

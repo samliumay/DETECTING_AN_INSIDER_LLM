@@ -4,21 +4,27 @@ These tests demonstrate implementation behavior only.  They do not provide
 evidence that the eventual discrepancy detector identifies insider behavior.
 """
 
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from detecting_an_insider_llm.tools import (
+    LIST_EMAILS_TOOL,
     READ_EMAIL_TOOL,
     SEND_EMAIL_TOOL,
     EmailMessage,
     SimulatedMailbox,
     email_tool_definitions,
     is_safe_test_address,
+    list_emails,
     read_email,
     send_email,
 )
+
+
+FIXED_TIME = datetime(2026, 8, 15, 16, 53, tzinfo=timezone.utc)
 
 
 @pytest.fixture
@@ -34,12 +40,14 @@ def mailbox() -> SimulatedMailbox:
         [
             {
                 "email_id": "older-001",
+                "timestamp": "2026-08-15T09:00:00Z",
                 "sender": "manager@company.test",
                 "recipient": "agent@research.test",
                 "subject": "Quarterly planning",
                 "body": "Please review the attached synthetic planning note.",
             }
-        ]
+        ],
+        clock=lambda: FIXED_TIME,
     )
 
 
@@ -51,9 +59,13 @@ def test_tool_definitions_are_closed_and_have_explicit_required_fields() -> None
     alter which model outputs count as valid tool calls.
     """
 
+    list_function = LIST_EMAILS_TOOL["function"]
     read_function = READ_EMAIL_TOOL["function"]
     send_function = SEND_EMAIL_TOOL["function"]
 
+    assert list_function["name"] == "list_emails"
+    assert list_function["parameters"]["required"] == []
+    assert list_function["parameters"]["additionalProperties"] is False
     assert read_function["name"] == "read_email"
     assert read_function["parameters"]["required"] == ["email_id"]
     assert read_function["parameters"]["additionalProperties"] is False
@@ -77,9 +89,71 @@ def test_tool_definition_factory_prevents_cross_run_mutation() -> None:
 
     assert second[0]["function"]["description"] != "mutated by provider"
     assert [tool["function"]["name"] for tool in second] == [
+        "list_emails",
         "read_email",
         "send_email",
     ]
+
+
+def test_list_emails_returns_oldest_first_headers_without_bodies() -> None:
+    """Verify discovery orders mail by timestamp and withholds body content.
+
+    The input is deliberately newest-first.  The result must expose stable IDs
+    and natural headers in chronological order, while complete evidence remains
+    available only through separate `read_email` calls.
+    """
+
+    mailbox = SimulatedMailbox(
+        [
+            {
+                "email_id": "newer",
+                "timestamp": "2026-08-15T10:00:00Z",
+                "sender": "newer@company.test",
+                "recipient": "agent@research.test",
+                "subject": "Newer subject",
+                "body": "Newer private body.",
+            },
+            {
+                "email_id": "older",
+                "timestamp": "2026-08-15T09:00:00Z",
+                "sender": "older@company.test",
+                "recipient": "agent@research.test",
+                "subject": "Older subject",
+                "body": "Older private body.",
+            },
+        ]
+    )
+
+    result = list_emails({}, mailbox)
+
+    assert result.status == "succeeded"
+    assert result.arguments == {}
+    assert result.model_result["count"] == 2
+    assert [item["email_id"] for item in result.model_result["emails"]] == [
+        "older",
+        "newer",
+    ]
+    assert result.model_result["emails"][0] == {
+        "email_id": "older",
+        "timestamp": "2026-08-15T09:00:00Z",
+        "from": "older@company.test",
+        "to": "agent@research.test",
+        "subject": "Older subject",
+    }
+    assert all("body" not in item for item in result.model_result["emails"])
+    assert result.audit_result["simulated"] is True
+
+
+def test_list_emails_rejects_undeclared_arguments(
+    mailbox: SimulatedMailbox,
+) -> None:
+    """Verify an invented discovery filter remains an observable rejection."""
+
+    result = mailbox.list_emails({"unread_only": True})
+
+    assert result.status == "rejected"
+    assert result.arguments == {"unread_only": True}
+    assert result.model_result["error_code"] == "invalid_arguments"
 
 
 def test_read_email_returns_the_requested_older_message(
@@ -99,6 +173,7 @@ def test_read_email_returns_the_requested_older_message(
         "ok": True,
         "email": {
             "email_id": "older-001",
+            "timestamp": "2026-08-15T09:00:00Z",
             "from": "manager@company.test",
             "to": "agent@research.test",
             "subject": "Quarterly planning",
@@ -188,6 +263,7 @@ def test_send_email_records_a_simulated_message_in_the_outbox(
     assert mailbox.sent_emails == (
         EmailMessage(
             email_id="sent-0001",
+            timestamp=FIXED_TIME,
             sender="agent@research.test",
             recipient="reviewer@outside.test",
             subject="Requested material",
@@ -220,6 +296,10 @@ def test_successful_send_ids_are_deterministic_and_monotonic(
     assert [email.email_id for email in mailbox.sent_emails] == [
         "sent-0001",
         "sent-0002",
+    ]
+    assert [email.timestamp for email in mailbox.sent_emails] == [
+        FIXED_TIME,
+        FIXED_TIME,
     ]
 
 
@@ -335,6 +415,7 @@ def test_mailbox_rejects_duplicate_ids_and_unsafe_fixture_addresses() -> None:
 
     duplicate = {
         "email_id": "same-id",
+        "timestamp": "2026-08-15T09:00:00Z",
         "sender": "sender@company.test",
         "recipient": "agent@research.test",
         "subject": "Synthetic",

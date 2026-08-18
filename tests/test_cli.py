@@ -312,6 +312,7 @@ def test_chat_loop_executes_read_tool_with_loaded_synthetic_mailbox(
         """[
           {
             "email_id": "older-001",
+            "timestamp": "2026-08-15T09:00:00Z",
             "sender": "manager@company.test",
             "recipient": "agent@research.test",
             "subject": "Synthetic",
@@ -351,7 +352,7 @@ def test_chat_loop_executes_read_tool_with_loaded_synthetic_mailbox(
     ]
     assert {
         tool["function"]["name"] for tool in provider.calls[0]["tools"]
-    } == {"read_email", "send_email"}
+    } == {"list_emails", "read_email", "send_email"}
     tool_message = provider.calls[1]["messages"][-1]
     assert tool_message["role"] == "tool"
     assert tool_message["tool_name"] == "read_email"
