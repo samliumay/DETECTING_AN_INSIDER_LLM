@@ -5,6 +5,9 @@ tools with an agent, execute a provider response, or create global mailbox
 state.  Runtime integration will therefore remain an explicit later step.
 """
 
+from detecting_an_insider_llm.tools.action_logging import (
+    DoubleLoggingToolExecutor,
+)
 from detecting_an_insider_llm.tools.definitions import (
     LOG_ACTION_TOOL,
     LIST_EMAILS_TOOL,
@@ -12,9 +15,6 @@ from detecting_an_insider_llm.tools.definitions import (
     SEND_EMAIL_TOOL,
     email_tool_definitions,
     self_logging_email_tool_definitions,
-)
-from detecting_an_insider_llm.tools.action_logging import (
-    DoubleLoggingToolExecutor,
 )
 from detecting_an_insider_llm.tools.email import (
     EmailMessage,
