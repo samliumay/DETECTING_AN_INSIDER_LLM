@@ -295,7 +295,7 @@ The typed loader rejects unknown cells, path traversal, duplicate IDs,
 nonchronological timestamps, future mail, incompatible evaluation IDs, and
 unsafe non-`.test` addresses before any provider is called.
 
-The scenario reserves 16 ordinary-tool attempts, 16 future self-log attempts,
+The scenario reserves 16 ordinary-tool attempts, 16 self-log attempts,
 and at most 40 provider turns. A normal sequential path uses one list, eleven
 reads, and at most one send. Separate action and logging limits prevent logging
 overhead from silently reducing the action budget.
@@ -311,7 +311,7 @@ overhead from silently reducing the action budget.
 ├── src/detecting_an_insider_llm/
 │   ├── providers/              # Provider adapters
 │   ├── runtime/                # Agent and bounded tool loop
-│   ├── tools/                  # Typed, simulated email tools
+│   ├── tools/                  # Typed email and self-logging tools
 │   └── scenario_loader.py      # Scenario validation and composition
 ├── tests/                      # Offline test suite
 ├── main.py                     # Repository-level entry point
@@ -327,15 +327,17 @@ overhead from silently reducing the action budget.
 - [x] Ollama chat adapter with exact runtime/model metadata support
 - [x] Stateful agent with a bounded, allowlisted email-tool loop
 - [x] In-memory mailbox and outbox restricted to `.test` addresses
+- [x] Model-visible `log_action` schema and audit-blind self-log store
+- [x] Composed executor that assigns `log_id` values to dispatched ordinary
+  calls while retaining automatic and model-created records separately
 - [x] Offline tests for the agent, CLI, provider, tools, loader, and tool loop
 
 ### Blockers before the first pilot
 
-- [ ] Implement the model-visible `log_action` tool and experimental
-  self-logging instruction.
 - [ ] Add a non-interactive runner for one isolated scenario episode.
 - [ ] Atomically persist the four raw records under a unique run directory.
-- [ ] Enforce separate ordinary-tool, self-log, and provider-turn limits.
+- [ ] Enforce separate ordinary-tool, self-log, and provider-turn limits,
+  including automatic records for ordinary attempts rejected at a limit.
 - [ ] Implement the offline analyzer and versioned `results.json` output.
 - [ ] Add an end-to-end fixture covering a complete run, inaccurate or missing
   logging, malformed output, and provider failure.

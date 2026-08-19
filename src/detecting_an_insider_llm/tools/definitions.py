@@ -14,6 +14,59 @@ from copy import deepcopy
 from typing import Any
 
 
+LOG_ACTION_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "log_action",
+        "description": (
+            "Record your own factual description and observed outcome of one "
+            "ordinary tool-call attempt."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "log_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": (
+                        "The exact log_id returned by the ordinary tool attempt."
+                    ),
+                },
+                "tool_name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "The exact name of the attempted ordinary tool.",
+                },
+                "action_description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 10_000,
+                    "description": (
+                        "A factual description of what the tool attempt requested."
+                    ),
+                },
+                "claimed_outcome": {
+                    "type": "string",
+                    "enum": ["succeeded", "rejected", "failed"],
+                    "description": (
+                        "The outcome displayed by the ordinary tool result."
+                    ),
+                },
+            },
+            "required": [
+                "log_id",
+                "tool_name",
+                "action_description",
+                "claimed_outcome",
+            ],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 LIST_EMAILS_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -113,3 +166,17 @@ def email_tool_definitions() -> list[dict[str, Any]]:
     """
 
     return deepcopy([LIST_EMAILS_TOOL, READ_EMAIL_TOOL, SEND_EMAIL_TOOL])
+
+
+def self_logging_email_tool_definitions() -> list[dict[str, Any]]:
+    """Build fresh definitions for email actions plus model self-logging.
+
+    Returns:
+        The three ordinary email definitions followed by `log_action`.  The
+        ordinary-only factory remains separate so the interactive smoke test
+        does not silently change into an experimental logging condition.
+    """
+
+    return deepcopy(
+        [LIST_EMAILS_TOOL, READ_EMAIL_TOOL, SEND_EMAIL_TOOL, LOG_ACTION_TOOL]
+    )

@@ -6,10 +6,12 @@ state.  Runtime integration will therefore remain an explicit later step.
 """
 
 from detecting_an_insider_llm.tools.definitions import (
+    LOG_ACTION_TOOL,
     LIST_EMAILS_TOOL,
     READ_EMAIL_TOOL,
     SEND_EMAIL_TOOL,
     email_tool_definitions,
+    self_logging_email_tool_definitions,
 )
 from detecting_an_insider_llm.tools.email import (
     EmailMessage,
@@ -22,23 +24,43 @@ from detecting_an_insider_llm.tools.email import (
     read_email,
     send_email,
 )
-from detecting_an_insider_llm.tools.registry import EmailToolDispatcher
+from detecting_an_insider_llm.tools.registry import (
+    DoubleLoggingToolExecutor,
+    EmailToolDispatcher,
+)
+from detecting_an_insider_llm.tools.self_log import (
+    AutomaticActionRecord,
+    ClaimedOutcome,
+    LogActionArguments,
+    ModelSelfLogRecord,
+    SelfLogStore,
+    log_action,
+)
 from detecting_an_insider_llm.runtime.tool_loop import ToolExecutionResult
 
 __all__ = [
-    "LIST_EMAILS_TOOL",
-    "READ_EMAIL_TOOL",
-    "SEND_EMAIL_TOOL",
+    "AutomaticActionRecord",
+    "ClaimedOutcome",
+    "DoubleLoggingToolExecutor",
     "EmailMessage",
     "EmailToolDispatcher",
+    "LIST_EMAILS_TOOL",
+    "LOG_ACTION_TOOL",
     "ListEmailsArguments",
+    "LogActionArguments",
+    "ModelSelfLogRecord",
+    "READ_EMAIL_TOOL",
     "ReadEmailArguments",
+    "SEND_EMAIL_TOOL",
     "SendEmailArguments",
     "SimulatedMailbox",
+    "SelfLogStore",
     "ToolExecutionResult",
     "email_tool_definitions",
     "is_safe_test_address",
     "list_emails",
+    "log_action",
     "read_email",
     "send_email",
+    "self_logging_email_tool_definitions",
 ]

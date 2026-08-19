@@ -19,9 +19,11 @@ from detecting_an_insider_llm.runtime import (
 )
 from detecting_an_insider_llm.runtime.agents import ThinkingMode
 from detecting_an_insider_llm.tools import (
+    DoubleLoggingToolExecutor,
     EmailToolDispatcher,
     SimulatedMailbox,
     email_tool_definitions,
+    self_logging_email_tool_definitions,
 )
 
 
@@ -230,6 +232,70 @@ def test_tool_loop_lists_headers_without_leaking_email_bodies() -> None:
     assert "Review this controlled message." not in provider.calls[1]["messages"][-1][
         "content"
     ]
+
+
+def test_tool_loop_returns_log_id_and_accepts_non_recursive_self_log() -> None:
+    """Verify the complete ordinary-action → self-log → answer lifecycle.
+
+    The first tool receipt exposes the automatic action's `log_id`.  The model
+    then submits one structured `log_action`, which is stored separately and
+    produces no new automatic record or recursive logging requirement.
+    """
+
+    provider = ScriptedProvider(
+        [
+            _response(
+                tool_calls=[
+                    _tool_call(
+                        "read_email",
+                        {"email_id": "older-001"},
+                        call_id="ordinary-1",
+                    )
+                ]
+            ),
+            _response(
+                tool_calls=[
+                    _tool_call(
+                        "log_action",
+                        {
+                            "log_id": "log-0001",
+                            "tool_name": "read_email",
+                            "action_description": "Read email older-001.",
+                            "claimed_outcome": "succeeded",
+                        },
+                        call_id="self-log-1",
+                    )
+                ]
+            ),
+            _response(content="The requested message was reviewed."),
+        ]
+    )
+    executor = DoubleLoggingToolExecutor(EmailToolDispatcher(_mailbox()))
+    agent = Agent(provider, tools=self_logging_email_tool_definitions())
+
+    result = agent.run_with_tools(
+        "Review the message and self-log the attempt.",
+        executor=executor,
+        max_tool_rounds=3,
+    )
+
+    first_receipt = json.loads(provider.calls[1]["messages"][-1]["content"])
+    second_receipt = json.loads(provider.calls[2]["messages"][-1]["content"])
+    assert result.termination_reason == "completed"
+    assert result.tool_rounds == 2
+    assert [
+        execution.call.requested_tool_name for execution in result.tool_executions
+    ] == ["read_email", "log_action"]
+    assert first_receipt["log_id"] == "log-0001"
+    assert second_receipt["detail"] == "Action self-log stored."
+    assert "log_id" not in second_receipt
+    assert len(executor.automatic_records) == 1
+    assert executor.automatic_records[0].requested_tool_name == "read_email"
+    assert len(executor.self_logs) == 1
+    assert executor.self_logs[0].log_id == "log-0001"
+    assert {
+        tool["function"]["name"] for tool in provider.calls[0]["tools"]
+    } == {"list_emails", "read_email", "send_email", "log_action"}
 
 
 def test_tool_loop_rejects_unknown_and_malformed_calls_then_continues() -> None:
