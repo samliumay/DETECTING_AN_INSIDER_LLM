@@ -5,6 +5,7 @@ tools with an agent, execute a provider response, or create global mailbox
 state.  Runtime integration will therefore remain an explicit later step.
 """
 
+from detecting_an_insider_llm.runtime.tool_loop import ToolExecutionResult
 from detecting_an_insider_llm.tools.action_logging import (
     DoubleLoggingToolExecutor,
 )
@@ -36,7 +37,6 @@ from detecting_an_insider_llm.tools.self_log import (
     SelfLogStore,
     log_action,
 )
-from detecting_an_insider_llm.runtime.tool_loop import ToolExecutionResult
 
 __all__ = [
     "AutomaticActionRecord",
