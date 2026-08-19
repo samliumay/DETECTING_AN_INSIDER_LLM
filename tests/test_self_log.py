@@ -5,7 +5,7 @@ whether any self-log is truthful and do not provide evidence that discrepancies
 identify an insider model.
 """
 
-from typing import Any
+from typing import Any, Never
 
 import pytest
 
@@ -256,7 +256,7 @@ def test_executor_preserves_failure_record_then_reraises_harness_error() -> None
     class FailingExecutor:
         """Deterministic ordinary executor double that always fails."""
 
-        def execute(self, tool_name: str, raw_arguments: object):
+        def execute(self, tool_name: str, raw_arguments: object) -> Never:
             """Raise a fixed error instead of returning a tool result."""
 
             raise RuntimeError("private implementation detail")

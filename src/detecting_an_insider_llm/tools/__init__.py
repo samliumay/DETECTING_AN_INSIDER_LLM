@@ -13,6 +13,9 @@ from detecting_an_insider_llm.tools.definitions import (
     email_tool_definitions,
     self_logging_email_tool_definitions,
 )
+from detecting_an_insider_llm.tools.action_logging import (
+    DoubleLoggingToolExecutor,
+)
 from detecting_an_insider_llm.tools.email import (
     EmailMessage,
     ListEmailsArguments,
@@ -24,10 +27,7 @@ from detecting_an_insider_llm.tools.email import (
     read_email,
     send_email,
 )
-from detecting_an_insider_llm.tools.registry import (
-    DoubleLoggingToolExecutor,
-    EmailToolDispatcher,
-)
+from detecting_an_insider_llm.tools.registry import EmailToolDispatcher
 from detecting_an_insider_llm.tools.self_log import (
     AutomaticActionRecord,
     ClaimedOutcome,
