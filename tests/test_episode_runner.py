@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from detecting_an_insider_llm.runtime.agents import (
+    ProviderFinishReason,
     ProviderResponse,
     ThinkingMode,
 )
@@ -91,6 +92,7 @@ def _response(
     *,
     content: str = "",
     tool_calls: Sequence[object] = (),
+    finish_reason: ProviderFinishReason = "complete",
 ) -> ProviderResponse:
     """Build a normalized response with a distinct raw evidence snapshot."""
 
@@ -100,6 +102,7 @@ def _response(
     return ProviderResponse(
         message=message,
         raw_response={"message": deepcopy(message), "offline_fixture": True},
+        finish_reason=finish_reason,
     )
 
 
@@ -110,6 +113,32 @@ def _resolved_scenario() -> ResolvedScenario:
         SCENARIO_PATH,
         condition_id="baseline",
         policy_context_id="none",
+    )
+
+
+def _fixed_operational_provenance(_: Path) -> dict[str, Any]:
+    """Return deterministic repository/host metadata for runner tests."""
+
+    return {
+        "code": {
+            "capture_status": "captured",
+            "git_revision": "fixture-revision",
+            "git_dirty": False,
+        },
+        "execution_host": {
+            "capture_scope": "python_process",
+            "snapshot_id": "fixture-host",
+        },
+    }
+
+
+def _runner(provider: ScriptedProvider, **kwargs: Any) -> ScenarioRunner:
+    """Construct a runner without consulting the developer machine."""
+
+    return ScenarioRunner(
+        provider,
+        operational_provenance_factory=_fixed_operational_provenance,
+        **kwargs,
     )
 
 
@@ -163,6 +192,7 @@ def test_runner_completes_one_double_logged_episode() -> None:
         provider,
         options={"temperature": 0.2, "seed": 7},
         think="low",
+        operational_provenance_factory=_fixed_operational_provenance,
     )
 
     result = runner.run(scenario)
@@ -173,6 +203,9 @@ def test_runner_completes_one_double_logged_episode() -> None:
     assert result.ordinary_tool_attempt_count == 1
     assert result.self_log_attempt_count == 1
     assert result.provider_metadata == {"provider_version": "offline-fixture-1"}
+    assert result.operational_provenance == _fixed_operational_provenance(
+        SCENARIO_PATH.parent
+    )
     assert provider.metadata_call_count == 1
     assert result.options == {"temperature": 0.2, "seed": 7}
     assert result.think == "low"
@@ -202,6 +235,31 @@ def test_runner_completes_one_double_logged_episode() -> None:
     }
     assert result.last_response is not None
     assert result.last_response.message["content"] == "Mailbox review is complete."
+
+
+def test_runner_fails_before_provider_call_when_provenance_capture_raises() -> None:
+    """Unexpected provenance failure cannot produce an untraceable model run."""
+
+    provider = ScriptedProvider([])
+
+    def fail_capture(_: Path) -> dict[str, Any]:
+        raise RuntimeError("provenance probe failed")
+
+    result = ScenarioRunner(
+        provider,
+        operational_provenance_factory=fail_capture,
+    ).run(_resolved_scenario())
+
+    assert result.status == "failed"
+    assert result.termination_reason == "operational_provenance_error"
+    assert result.provider_turn_count == 0
+    assert result.operational_provenance == {}
+    assert result.provider_metadata == {}
+    assert provider.metadata_call_count == 0
+    assert provider.calls == []
+    assert result.error is not None
+    assert result.error.phase == "operational_provenance"
+    assert result.error.error_type == "RuntimeError"
 
 
 def test_runner_keeps_ordinary_and_self_log_attempt_budgets_separate() -> None:
@@ -238,7 +296,7 @@ def test_runner_keeps_ordinary_and_self_log_attempt_budgets_separate() -> None:
         self_log_attempts=3,
     )
 
-    result = ScenarioRunner(provider).run(scenario)
+    result = _runner(provider).run(scenario)
 
     assert result.status == "incomplete"
     assert result.termination_reason == "max_ordinary_tool_attempts"
@@ -287,7 +345,7 @@ def test_runner_rejects_self_log_beyond_zero_budget_without_fabricating_log() ->
         self_log_attempts=0,
     )
 
-    result = ScenarioRunner(provider).run(scenario)
+    result = _runner(provider).run(scenario)
 
     assert result.status == "incomplete"
     assert result.termination_reason == "max_self_log_attempts"
@@ -318,7 +376,7 @@ def test_runner_stops_before_call_beyond_provider_turn_budget() -> None:
         self_log_attempts=2,
     )
 
-    result = ScenarioRunner(provider).run(scenario)
+    result = _runner(provider).run(scenario)
 
     assert result.status == "incomplete"
     assert result.termination_reason == "max_provider_turns"
@@ -345,7 +403,7 @@ def test_runner_preserves_malformed_call_as_rejected_ordinary_attempt() -> None:
         ]
     )
 
-    result = ScenarioRunner(provider).run(_resolved_scenario())
+    result = _runner(provider).run(_resolved_scenario())
 
     assert result.status == "completed"
     assert result.ordinary_tool_attempt_count == 1
@@ -368,7 +426,7 @@ def test_runner_returns_failed_result_with_partial_provider_evidence() -> None:
         ]
     )
 
-    result = ScenarioRunner(provider).run(_resolved_scenario())
+    result = _runner(provider).run(_resolved_scenario())
 
     assert result.status == "failed"
     assert result.termination_reason == "provider_error"
@@ -382,16 +440,82 @@ def test_runner_returns_failed_result_with_partial_provider_evidence() -> None:
     assert result.error.message == "provider unavailable"
 
 
+def test_runner_treats_length_truncated_final_response_as_incomplete() -> None:
+    """A token-limited answer is retained but cannot complete the episode."""
+
+    provider = ScriptedProvider(
+        [_response(content="Review is incom", finish_reason="length")]
+    )
+
+    result = _runner(provider).run(_resolved_scenario())
+
+    assert result.status == "incomplete"
+    assert result.termination_reason == "provider_output_truncated"
+    assert result.provider_turn_count == 1
+    assert len(result.provider_responses) == 1
+    assert result.tool_executions == ()
+    assert [item["role"] for item in result.messages] == ["system", "user"]
+    assert result.error is None
+
+
+def test_runner_does_not_execute_tool_call_from_length_truncated_response() -> None:
+    """Even a parseable call may have partial arguments when generation is cut."""
+
+    provider = ScriptedProvider(
+        [
+            _response(
+                tool_calls=[
+                    _tool_call("send_email", {"to": "kyle@summitbridge.test"})
+                ],
+                finish_reason="length",
+            )
+        ]
+    )
+
+    result = _runner(provider).run(_resolved_scenario())
+
+    assert result.status == "incomplete"
+    assert result.termination_reason == "provider_output_truncated"
+    assert result.ordinary_tool_attempt_count == 0
+    assert result.self_log_attempt_count == 0
+    assert result.tool_executions == ()
+    assert result.automatic_records == ()
+    assert result.sent_emails == ()
+
+
+def test_runner_treats_unknown_finish_reason_as_incomplete() -> None:
+    """An unrecognized provider state cannot silently become a completed run."""
+
+    provider = ScriptedProvider(
+        [
+            _response(
+                content="Provider returned a future state.",
+                finish_reason="unknown",
+            )
+        ]
+    )
+
+    result = _runner(provider).run(_resolved_scenario())
+
+    assert result.status == "incomplete"
+    assert result.termination_reason == "provider_finish_reason_unknown"
+    assert len(result.provider_responses) == 1
+    assert result.tool_executions == ()
+    assert [item["role"] for item in result.messages] == ["system", "user"]
+    assert result.error is None
+
+
 def test_runner_retains_invalid_provider_response_before_contract_failure() -> None:
     """Verify provider-shaped malformed output is kept for later diagnosis."""
 
     invalid = ProviderResponse(
         message={"role": "user", "content": "wrong role"},
         raw_response={"message": {"role": "user", "content": "wrong role"}},
+        finish_reason="complete",
     )
     provider = ScriptedProvider([invalid])
 
-    result = ScenarioRunner(provider).run(_resolved_scenario())
+    result = _runner(provider).run(_resolved_scenario())
 
     assert result.status == "failed"
     assert result.termination_reason == "provider_contract_error"
@@ -420,7 +544,7 @@ def test_runner_returns_tool_failure_and_keeps_prior_automatic_record() -> None:
             )
         ]
     )
-    runner = ScenarioRunner(provider, log_id_factory=lambda _: "duplicate-id")
+    runner = _runner(provider, log_id_factory=lambda _: "duplicate-id")
 
     result = runner.run(_resolved_scenario())
 

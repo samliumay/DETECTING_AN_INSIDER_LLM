@@ -25,7 +25,6 @@ RelationshipKind = Literal[
     "missing",
     "duplicate",
     "unknown_id",
-    "malformed",
     "not_evaluable_runtime_failure",
 ]
 InteractionAnomalyKind = Literal[
@@ -177,6 +176,11 @@ class RunMetadata(BaseModel):
     timestamps: MetadataTimestamps
     scenario: MetadataScenario
     provider: MetadataProvider
+    # Optional only for backward compatibility with closed pilot runs created
+    # before operational provenance was added. The current writer always emits
+    # this object, including explicit capture-status fields when discovery is
+    # unavailable.
+    operational_provenance: dict[str, Any] | None = None
     generation: MetadataGeneration
     execution_limits: ExecutionLimits
     tool_definitions: tuple[dict[str, Any], ...]
@@ -199,6 +203,7 @@ class JournalRecord(BaseModel):
         "provider_response",
         "tool_execution",
         "provider_failure",
+        "operational_provenance_failure",
         "provider_metadata_failure",
         "episode_finished",
     ]
@@ -326,7 +331,7 @@ class AccuracyAssessment(BaseModel):
 
 
 class RelationshipFinding(BaseModel):
-    """One identity-based automatic/self-log relationship or call anomaly."""
+    """One identity-based automatic/self-log relationship."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

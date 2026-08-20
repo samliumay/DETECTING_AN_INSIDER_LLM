@@ -96,7 +96,24 @@ def _response(
     return ProviderResponse(
         message=message,
         raw_response={"message": deepcopy(message), "artifact_fixture": True},
+        finish_reason="complete",
     )
+
+
+def _fixed_operational_provenance(_: Path) -> dict[str, Any]:
+    """Return stable operational metadata for serialized fixture runs."""
+
+    return {
+        "code": {
+            "capture_status": "captured",
+            "git_revision": "fixture-revision",
+            "git_dirty": False,
+        },
+        "execution_host": {
+            "capture_scope": "python_process",
+            "snapshot_id": "fixture-host",
+        },
+    }
 
 
 def _run_episode(
@@ -113,6 +130,7 @@ def _run_episode(
         ScriptedProvider(responses),
         options={"temperature": 0.1, "seed": 19},
         think=False,
+        operational_provenance_factory=_fixed_operational_provenance,
     ).run(scenario)
 
 
@@ -186,6 +204,9 @@ def test_writer_publishes_exact_closed_four_file_run(tmp_path: Path) -> None:
     assert metadata["counts"]["provider_turn_attempts"] == 3
     assert metadata["counts"]["automatic_records"] == 1
     assert metadata["counts"]["model_self_log_records"] == 1
+    assert metadata["operational_provenance"] == _fixed_operational_provenance(
+        SCENARIO_PATH.parent
+    )
     assert set(metadata["artifacts"]) == RAW_FILENAMES
 
     journal_rows = _read_json_lines(result.journal_path)
@@ -207,6 +228,11 @@ def test_writer_publishes_exact_closed_four_file_run(tmp_path: Path) -> None:
     scenario_snapshot = journal_rows[0]["payload"]["scenario"]
     assert len(scenario_snapshot["input_emails"]) == 11
     assert scenario_snapshot["system_prompt"] == episode.system_prompt
+    assert {
+        row["payload"]["finish_reason"]
+        for row in journal_rows
+        if row["event_type"] == "provider_response"
+    } == {"complete"}
     assert journal_rows[-1]["payload"]["status"] == "completed"
 
     for artifact_path in (
@@ -232,6 +258,43 @@ def test_writer_creates_empty_jsonl_streams_without_fabricated_records(
 
     assert result.automated_logs_path.read_text(encoding="utf-8") == ""
     assert result.model_self_logs_path.read_text(encoding="utf-8") == ""
+
+
+def test_writer_preserves_pre_provider_provenance_failure(tmp_path: Path) -> None:
+    """An unexpected capture failure closes without contacting the provider."""
+
+    scenario = resolve_scenario(
+        SCENARIO_PATH,
+        condition_id="baseline",
+        policy_context_id="none",
+    )
+
+    def fail_capture(_: Path) -> dict[str, Any]:
+        raise RuntimeError("provenance probe failed")
+
+    episode = ScenarioRunner(
+        ScriptedProvider([]),
+        operational_provenance_factory=fail_capture,
+    ).run(scenario)
+    result = RunArtifactWriter(tmp_path / "runs").write(
+        episode,
+        run_id="provenance-failure-001",
+    )
+
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["terminal"]["termination_reason"] == (
+        "operational_provenance_error"
+    )
+    assert metadata["operational_provenance"] == {}
+    assert metadata["counts"]["provider_turn_attempts"] == 0
+    event_types = [
+        row["event_type"] for row in _read_json_lines(result.journal_path)
+    ]
+    assert event_types == [
+        "episode_started",
+        "operational_provenance_failure",
+        "episode_finished",
+    ]
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
     assert metadata["artifacts"]["automated_logs.jsonl"]["record_count"] == 0
     assert metadata["artifacts"]["model_self_logs.jsonl"]["record_count"] == 0
@@ -312,6 +375,7 @@ def test_writer_rejects_non_json_evidence_before_disk_access(tmp_path: Path) -> 
     invalid_response = ProviderResponse(
         message=deepcopy(original_response.message),
         raw_response={"unsupported": object()},
+        finish_reason=original_response.finish_reason,
     )
     invalid_episode = replace(
         episode,
@@ -326,6 +390,33 @@ def test_writer_rejects_non_json_evidence_before_disk_access(tmp_path: Path) -> 
         )
 
     assert not runs_root.exists()
+
+
+def test_writer_rejects_completed_episode_with_truncated_final_response(
+    tmp_path: Path,
+) -> None:
+    """Persistence must not reintroduce the pilot's false-completion state."""
+
+    episode = _run_episode([_response(content="Complete.")])
+    truncated_response = replace(
+        episode.provider_responses[-1],
+        finish_reason="length",
+    )
+    invalid_episode = replace(
+        episode,
+        provider_responses=(*episode.provider_responses[:-1], truncated_response),
+    )
+
+    with pytest.raises(
+        ArtifactSerializationError,
+        match="must end with a complete provider response",
+    ):
+        RunArtifactWriter(tmp_path / "runs").write(
+            invalid_episode,
+            run_id="invalid-truncated-completion",
+        )
+
+    assert not (tmp_path / "runs").exists()
 
 
 def test_writer_cleans_staging_when_a_file_write_fails(

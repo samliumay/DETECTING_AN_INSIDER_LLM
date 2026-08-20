@@ -29,6 +29,7 @@ from typing import Any
 import requests
 
 from detecting_an_insider_llm.runtime.agents import (
+    ProviderFinishReason,
     ProviderResponse,
     ThinkingMode,
 )
@@ -145,8 +146,8 @@ class OllamaClient:
                 Boolean or supported named reasoning effort.
 
         Returns:
-            A :class:`ProviderResponse` containing both the normalized assistant
-            message and the complete decoded Ollama response.
+            A :class:`ProviderResponse` containing the normalized assistant
+            message and finish reason plus the complete decoded Ollama response.
 
         Raises:
             ValueError:
@@ -177,8 +178,8 @@ class OllamaClient:
 
         raw_response = self._request_json("POST", "chat", payload)
 
-        # Normalize only the field required by Agent. All other provider fields
-        # remain available in raw_response for provenance and later analysis.
+        # Normalize the fields required by the shared runtime. All provider
+        # fields remain available in raw_response for provenance and analysis.
         message = raw_response.get("message")
         if not isinstance(message, dict):
             raise OllamaClientError("Ollama response is missing a message object.")
@@ -186,6 +187,7 @@ class OllamaClient:
         return ProviderResponse(
             message=deepcopy(message),
             raw_response=deepcopy(raw_response),
+            finish_reason=_normalized_finish_reason(raw_response),
         )
 
     def runtime_metadata(self) -> dict[str, Any]:
@@ -206,6 +208,12 @@ class OllamaClient:
             "model_kind": (
                 "cloud" if self._model.casefold().endswith(":cloud") else "local"
             ),
+            "request_timeout_seconds": self._timeout_seconds,
+            "keep_alive": self._keep_alive,
+            "resolved_model": None,
+            "model_digest": None,
+            "model_details": None,
+            "model_metadata_status": "unavailable",
         }
         try:
             version_response = self._request_json("GET", "version")
@@ -357,6 +365,27 @@ def _thinking_mode(value: ThinkingMode) -> ThinkingMode:
     return value
 
 
+def _normalized_finish_reason(
+    raw_response: Mapping[str, Any],
+) -> ProviderFinishReason:
+    """Translate Ollama completion evidence without guessing a normal stop.
+
+    Non-streaming chat requests are complete only when Ollama explicitly marks
+    the response done. A missing or future ``done_reason`` remains ``unknown``
+    so the experimental runner can preserve the response without executing a
+    possibly partial tool call or accepting a final answer.
+    """
+
+    if raw_response.get("done") is not True:
+        return "unknown"
+    done_reason = raw_response.get("done_reason")
+    if done_reason == "stop":
+        return "complete"
+    if done_reason == "length":
+        return "length"
+    return "unknown"
+
+
 def _matching_model_metadata(
     model: str,
     tags_response: Mapping[str, Any],
@@ -364,7 +393,7 @@ def _matching_model_metadata(
     """Extract provenance only for the exact configured model identifier."""
     models = tags_response.get("models")
     if not isinstance(models, list):
-        return {}
+        return {"model_metadata_status": "invalid_tags_response"}
 
     for item in models:
         if not isinstance(item, dict):
@@ -374,9 +403,15 @@ def _matching_model_metadata(
             str(item.get("model") or ""),
         }
         if model in known_names:
+            digest = item.get("digest")
+            if not isinstance(digest, str) or not digest.strip():
+                digest = None
             return {
                 "resolved_model": item.get("model") or item.get("name"),
-                "model_digest": item.get("digest"),
+                "model_digest": digest,
                 "model_details": deepcopy(item.get("details")),
+                "model_metadata_status": (
+                    "captured" if digest is not None else "digest_unavailable"
+                ),
             }
-    return {}
+    return {"model_metadata_status": "model_not_found"}

@@ -32,7 +32,10 @@ from detecting_an_insider_llm.runtime import (
     ToolLoopProviderError,
 )
 from detecting_an_insider_llm.runtime.agents import ThinkingMode
-from detecting_an_insider_llm.runtime.episode_runner import ScenarioRunner
+from detecting_an_insider_llm.runtime.episode_runner import (
+    OperationalProvenanceFactory,
+    ScenarioRunner,
+)
 from detecting_an_insider_llm.scenario_loader import resolve_scenario
 from detecting_an_insider_llm.tools import (
     EmailToolDispatcher,
@@ -297,6 +300,7 @@ def run_scenario(
     write_line: LineWriter = print,
     client_factory: ClientFactory | None = None,
     artifact_writer_factory: ArtifactWriterFactory | None = None,
+    operational_provenance_factory: OperationalProvenanceFactory | None = None,
 ) -> int:
     """Execute, persist, and summarize one resolved non-interactive episode.
 
@@ -306,10 +310,12 @@ def run_scenario(
         client_factory: Optional provider constructor; production uses Ollama.
         artifact_writer_factory: Optional persistence constructor; production
             uses :class:`RunArtifactWriter`.
+        operational_provenance_factory: Optional deterministic provenance seam
+            for offline tests. Production captures repository and host details.
 
     Returns:
-        Zero for a completed episode, two for an incomplete limit stop, three
-        for a runtime failure, or 130 for a captured provider-stage interrupt.
+        Zero for a completed episode, two for an incomplete episode, three for
+        a runtime failure, or 130 for a captured provider-stage interrupt.
 
     Raises:
         ValueError: For invalid scenario/provider configuration.
@@ -341,6 +347,7 @@ def run_scenario(
             provider,
             options=options,
             think=think,
+            operational_provenance_factory=operational_provenance_factory,
         ).run(scenario)
         artifacts = writer.write(episode, run_id=selected_run_id)
 

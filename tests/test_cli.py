@@ -58,6 +58,7 @@ class StubChatClient:
         return ProviderResponse(
             message=message,
             raw_response={"message": message},
+            finish_reason="complete",
         )
 
 
@@ -129,6 +130,7 @@ class ToolCallingClient:
         return ProviderResponse(
             message=message,
             raw_response={"message": deepcopy(message)},
+            finish_reason="complete",
         )
 
 

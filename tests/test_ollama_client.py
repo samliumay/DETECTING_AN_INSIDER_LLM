@@ -48,6 +48,7 @@ def test_chat_sends_non_streaming_payload_and_normalizes_response(
         "model": "test-model",
         "message": {"role": "assistant", "content": "done"},
         "done": True,
+        "done_reason": "stop",
     }
 
     def fake_request(method: str, url: str, **kwargs: Any) -> StubResponse:
@@ -76,6 +77,7 @@ def test_chat_sends_non_streaming_payload_and_normalizes_response(
 
     # Assert the shared runtime view and the retained provider evidence.
     assert result.message == {"role": "assistant", "content": "done"}
+    assert result.finish_reason == "complete"
     assert result.raw_response == response_body
 
     # Exact payload comparison is intentional: silently dropping `stream=False`,
@@ -99,6 +101,46 @@ def test_chat_sends_non_streaming_payload_and_normalizes_response(
     }
 
     # The client does not own an injected session, so the test/caller closes it.
+    session.close()
+
+
+@pytest.mark.parametrize(
+    ("done", "done_reason", "expected"),
+    [
+        (True, "length", "length"),
+        (True, "future_reason", "unknown"),
+        (True, None, "unknown"),
+        (False, "stop", "unknown"),
+    ],
+)
+def test_chat_normalizes_nonstandard_finish_reasons_without_guessing_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    done: bool,
+    done_reason: object,
+    expected: str,
+) -> None:
+    """Unknown or unfinished provider states must not become normal completion."""
+
+    session = requests.Session()
+    response_body = {
+        "model": "test-model",
+        "message": {"role": "assistant", "content": "partial"},
+        "done": done,
+    }
+    if done_reason is not None:
+        response_body["done_reason"] = done_reason
+
+    monkeypatch.setattr(
+        session,
+        "request",
+        lambda *_args, **_kwargs: StubResponse(response_body),
+    )
+    client = OllamaClient(model="test-model", session=session)
+
+    result = client.chat([{"role": "user", "content": "hello"}])
+
+    assert result.finish_reason == expected
+    assert result.raw_response == response_body
     session.close()
 
 
@@ -168,6 +210,8 @@ def test_runtime_metadata_is_cached_and_includes_matching_model(
     client = OllamaClient(
         model="test-model",
         base_url="http://ollama.test",
+        timeout_seconds=45,
+        keep_alive=0,
         session=session,
     )
 
@@ -180,6 +224,9 @@ def test_runtime_metadata_is_cached_and_includes_matching_model(
         "base_url": "http://ollama.test",
         "model": "test-model",
         "model_kind": "local",
+        "request_timeout_seconds": 45.0,
+        "keep_alive": 0,
+        "model_metadata_status": "captured",
         "ollama_version": "1.2.3",
         "resolved_model": "test-model",
         "model_digest": "abc123",
@@ -192,4 +239,64 @@ def test_runtime_metadata_is_cached_and_includes_matching_model(
         "http://ollama.test/api/version",
         "http://ollama.test/api/tags",
     ]
+    session.close()
+
+
+def test_runtime_metadata_retains_missing_model_digest_explicitly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tags miss keeps identifier and null digest instead of omitting keys."""
+
+    session = requests.Session()
+
+    def fake_request(method: str, url: str, **kwargs: Any) -> StubResponse:
+        if url.endswith("/version"):
+            return StubResponse({"version": "1.2.3"})
+        return StubResponse({"models": []})
+
+    monkeypatch.setattr(session, "request", fake_request)
+    client = OllamaClient(model="remote-model:cloud", session=session)
+
+    metadata = client.runtime_metadata()
+
+    assert metadata["model"] == "remote-model:cloud"
+    assert metadata["model_kind"] == "cloud"
+    assert metadata["resolved_model"] is None
+    assert metadata["model_digest"] is None
+    assert metadata["model_details"] is None
+    assert metadata["model_metadata_status"] == "model_not_found"
+    assert metadata["request_timeout_seconds"] == 120.0
+    assert metadata["keep_alive"] == "5m"
+    session.close()
+
+
+def test_runtime_metadata_failure_preserves_config_and_null_model_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed enrichment remains visible without dropping configured settings."""
+
+    session = requests.Session()
+    monkeypatch.setattr(
+        session,
+        "request",
+        lambda *_args, **_kwargs: StubResponse({}, status_code=503),
+    )
+    client = OllamaClient(
+        model="test-model",
+        timeout_seconds=9,
+        keep_alive="1m",
+        session=session,
+    )
+
+    metadata = client.runtime_metadata()
+
+    assert metadata["model"] == "test-model"
+    assert metadata["request_timeout_seconds"] == 9.0
+    assert metadata["keep_alive"] == "1m"
+    assert metadata["resolved_model"] is None
+    assert metadata["model_digest"] is None
+    assert metadata["model_details"] is None
+    assert metadata["model_metadata_status"] == "unavailable"
+    assert metadata["metadata_error_type"] == "OllamaClientError"
+    assert "HTTP 503" in metadata["metadata_error"]
     session.close()

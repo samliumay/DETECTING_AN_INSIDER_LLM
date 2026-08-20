@@ -36,6 +36,13 @@ Message = dict[str, Any]
 # these shared values to their provider-specific representation.
 ThinkingMode = bool | Literal["high", "medium", "low"]
 
+# Provider adapters translate their native generation-stop values into this
+# small shared vocabulary. ``complete`` means the provider finished one turn
+# normally, whether that turn contains text or tool calls. ``unknown`` keeps a
+# missing or unrecognized provider value visible instead of guessing success.
+ProviderFinishReason = Literal["complete", "length", "unknown"]
+_PROVIDER_FINISH_REASONS = frozenset({"complete", "length", "unknown"})
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderResponse:
@@ -49,6 +56,9 @@ class ProviderResponse:
             The complete decoded provider response. Keeping it separate from the
             normalized message preserves provider metadata for the journal and
             later provenance analysis.
+        finish_reason:
+            Provider-neutral reason the generation turn ended. Experimental
+            runtimes must not treat ``length`` or ``unknown`` as completion.
 
     The dataclass is frozen so its attributes cannot be reassigned accidentally.
     Nested JSON values remain mutable, so the runtime takes defensive copies
@@ -57,6 +67,7 @@ class ProviderResponse:
 
     message: Message
     raw_response: dict[str, Any]
+    finish_reason: ProviderFinishReason
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,6 +419,11 @@ def validated_assistant_message(response: ProviderResponse) -> Message:
     """
     if not isinstance(response, ProviderResponse):
         raise ProviderContractError("Provider must return a ProviderResponse.")
+    if response.finish_reason not in _PROVIDER_FINISH_REASONS:
+        raise ProviderContractError(
+            "Provider response finish_reason must be 'complete', 'length', or "
+            "'unknown'."
+        )
 
     message = response.message
     if not isinstance(message, dict):
@@ -441,4 +457,5 @@ def copy_provider_response(response: ProviderResponse) -> ProviderResponse:
     return ProviderResponse(
         message=deepcopy(response.message),
         raw_response=deepcopy(response.raw_response),
+        finish_reason=response.finish_reason,
     )

@@ -320,6 +320,13 @@ def _validate_episode_for_persistence(episode: EpisodeResult) -> None:
             raise ArtifactSerializationError(
                 "A completed episode must have completed termination and no error."
             )
+        if (
+            not episode.provider_responses
+            or episode.provider_responses[-1].finish_reason != "complete"
+        ):
+            raise ArtifactSerializationError(
+                "A completed episode must end with a complete provider response."
+            )
     elif episode.status == "failed":
         if episode.error is None:
             raise ArtifactSerializationError(
@@ -466,6 +473,7 @@ def _journal_rows(
             "provider_response",
             {
                 "provider_turn": request.turn_sequence,
+                "finish_reason": response.finish_reason,
                 "message": deepcopy(response.message),
                 "raw_response": deepcopy(response.raw_response),
             },
@@ -499,6 +507,16 @@ def _journal_rows(
     if execution_cursor != len(episode.tool_executions):
         raise ArtifactSerializationError(
             "Tool executions cannot be ordered beneath provider responses."
+        )
+
+    if (
+        episode.error is not None
+        and episode.error.phase == "operational_provenance"
+        and not episode.provider_requests
+    ):
+        append_event(
+            "operational_provenance_failure",
+            {"error": asdict(episode.error)},
         )
 
     if (
@@ -568,6 +586,7 @@ def _metadata_document(
             "model_name": episode.model_name,
             "runtime_metadata": deepcopy(episode.provider_metadata),
         },
+        "operational_provenance": deepcopy(episode.operational_provenance),
         "generation": {
             "options": deepcopy(episode.options),
             "think": episode.think,

@@ -11,10 +11,11 @@ choose run IDs or write files; atomic creation and closure of immutable run
 artifacts is a separate persistence responsibility.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 from detecting_an_insider_llm.runtime.agents import (
@@ -24,6 +25,9 @@ from detecting_an_insider_llm.runtime.agents import (
     ThinkingMode,
     copy_provider_response,
     validated_assistant_message,
+)
+from detecting_an_insider_llm.runtime.provenance import (
+    capture_operational_provenance,
 )
 from detecting_an_insider_llm.runtime.tool_loop import (
     ParsedToolCall,
@@ -51,10 +55,13 @@ from detecting_an_insider_llm.tools.self_log import (
 EpisodeStatus = Literal["completed", "incomplete", "failed"]
 EpisodeTerminationReason = Literal[
     "completed",
+    "provider_output_truncated",
+    "provider_finish_reason_unknown",
     "max_provider_turns",
     "max_ordinary_tool_attempts",
     "max_self_log_attempts",
     "multiple_tool_attempt_limits",
+    "operational_provenance_error",
     "provider_metadata_error",
     "provider_error",
     "provider_contract_error",
@@ -62,11 +69,13 @@ EpisodeTerminationReason = Literal[
     "interrupted",
 ]
 FailurePhase = Literal[
+    "operational_provenance",
     "provider_metadata",
     "provider_call",
     "provider_response_validation",
     "tool_execution",
 ]
+OperationalProvenanceFactory = Callable[[Path], dict[str, Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,9 +87,10 @@ class EpisodeError:
         error_type: Concrete exception class name for failure accounting.
         message: Human-readable exception text for diagnosis.
 
-    Limit stops are represented by :attr:`EpisodeResult.termination_reason`,
-    not by this class, because reaching a declared limit is an incomplete run
-    rather than an unexpected runtime exception.
+    Expected non-exception stops are represented by
+    :attr:`EpisodeResult.termination_reason`, not by this class. Reaching a
+    declared limit or receiving a non-complete provider finish reason makes a
+    run incomplete rather than an unexpected runtime failure.
     """
 
     phase: FailurePhase
@@ -120,11 +130,12 @@ class EpisodeResult:
     writer can transform these snapshots into the four raw files without asking
     the provider or mutable mailbox for information after the run has ended.
 
-    `completed` means the provider returned a valid assistant message with no
-    tool calls.  `incomplete` means a declared budget stopped the interaction.
-    `failed` means provider metadata, provider execution, response validation,
-    or controlled tool execution raised an unexpected error.  These are runtime
-    classifications, not judgments about model alignment or intent.
+    `completed` means the provider returned a normally finished, valid assistant
+    message with no tool calls. `incomplete` means a declared budget or a
+    non-complete provider finish reason stopped the interaction. `failed` means
+    operational provenance, provider metadata, provider execution, response
+    validation, or controlled tool execution raised an unexpected error. These
+    are runtime classifications, not judgments about model alignment or intent.
     """
 
     schema_version: Literal["1"]
@@ -143,6 +154,7 @@ class EpisodeResult:
     input_emails: tuple[EmailMessage, ...]
     provider_name: str
     model_name: str
+    operational_provenance: dict[str, Any]
     provider_metadata: dict[str, Any]
     execution_limits: ExecutionLimits
     options: dict[str, Any] | None
@@ -181,6 +193,7 @@ class _EpisodeState:
 
     started_at: datetime
     messages: list[dict[str, Any]]
+    operational_provenance: dict[str, Any] = field(default_factory=dict)
     provider_metadata: dict[str, Any] = field(default_factory=dict)
     provider_requests: list[ProviderRequest] = field(default_factory=list)
     provider_responses: list[ProviderResponse] = field(default_factory=list)
@@ -203,6 +216,9 @@ class ScenarioRunner:
         log_id_factory: Optional deterministic ID seam for offline tests.  A
             production caller should normally use the default per-episode
             sequential IDs.
+        operational_provenance_factory: Optional deterministic seam for tests.
+            Production captures the scenario repository state on every run and
+            the execution host once per Python process.
 
     The caller owns the provider lifecycle.  A runner can reuse one provider
     connection for multiple calls, but every :meth:`run` creates a new mailbox,
@@ -216,6 +232,7 @@ class ScenarioRunner:
         options: Mapping[str, Any] | None = None,
         think: ThinkingMode = False,
         log_id_factory: LogIdFactory | None = None,
+        operational_provenance_factory: OperationalProvenanceFactory | None = None,
     ) -> None:
         """Validate stable provider identity and snapshot caller configuration."""
 
@@ -231,6 +248,9 @@ class ScenarioRunner:
         self._options = deepcopy(dict(options)) if options is not None else None
         self._think = think
         self._log_id_factory = log_id_factory
+        self._operational_provenance_factory = (
+            operational_provenance_factory or capture_operational_provenance
+        )
         self._tool_definitions = self_logging_email_tool_definitions()
 
     def run(self, scenario: ResolvedScenario) -> EpisodeResult:
@@ -265,8 +285,33 @@ class ScenarioRunner:
             log_id_factory=self._log_id_factory,
         )
 
-        # Metadata is captured before the first model call so a later provider
-        # mutation cannot change the configuration associated with this episode.
+        # Operational and provider metadata are captured before the first model
+        # call so later mutations cannot change the provenance for this episode.
+        try:
+            provenance = self._operational_provenance_factory(
+                scenario.source_path.parent
+            )
+            if not isinstance(provenance, dict):
+                raise ProviderContractError(
+                    "Operational provenance factory must return an object."
+                )
+            state.operational_provenance = deepcopy(provenance)
+        except (Exception, KeyboardInterrupt) as exc:
+            termination_reason: EpisodeTerminationReason = (
+                "interrupted"
+                if isinstance(exc, KeyboardInterrupt)
+                else "operational_provenance_error"
+            )
+            return self._finish(
+                scenario,
+                state,
+                executor,
+                mailbox,
+                status="failed",
+                termination_reason=termination_reason,
+                error=_episode_error("operational_provenance", exc),
+            )
+
         try:
             metadata = self._provider.runtime_metadata()
             if not isinstance(metadata, dict):
@@ -354,6 +399,23 @@ class ScenarioRunner:
                     status="failed",
                     termination_reason="provider_contract_error",
                     error=_episode_error("provider_response_validation", exc),
+                )
+
+            # A provider can expose a structurally valid but partial message at
+            # its output-token limit. Preserve that observation, but do not add
+            # it to the conversation or dispatch any tool call it contains.
+            if response.finish_reason != "complete":
+                return self._finish(
+                    scenario,
+                    state,
+                    executor,
+                    mailbox,
+                    status="incomplete",
+                    termination_reason=(
+                        "provider_output_truncated"
+                        if response.finish_reason == "length"
+                        else "provider_finish_reason_unknown"
+                    ),
                 )
 
             state.messages.append(assistant_message)
@@ -477,6 +539,7 @@ class ScenarioRunner:
             ),
             provider_name=self._provider_name,
             model_name=self._model_name,
+            operational_provenance=deepcopy(state.operational_provenance),
             provider_metadata=deepcopy(state.provider_metadata),
             execution_limits=scenario.spec.execution_limits.model_copy(deep=True),
             options=deepcopy(self._options),

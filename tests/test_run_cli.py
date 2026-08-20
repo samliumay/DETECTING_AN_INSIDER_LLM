@@ -25,7 +25,11 @@ from detecting_an_insider_llm.cli import (
     run_scenario,
 )
 from detecting_an_insider_llm.providers import OllamaClientError
-from detecting_an_insider_llm.runtime.agents import ProviderResponse, ThinkingMode
+from detecting_an_insider_llm.runtime.agents import (
+    ProviderFinishReason,
+    ProviderResponse,
+    ThinkingMode,
+)
 
 
 SCENARIO_PATH = (
@@ -100,6 +104,7 @@ def _response(
     *,
     content: str = "",
     tool_calls: Sequence[object] = (),
+    finish_reason: ProviderFinishReason = "complete",
 ) -> ProviderResponse:
     """Build one normalized provider response with retained raw evidence."""
 
@@ -109,6 +114,7 @@ def _response(
     return ProviderResponse(
         message=message,
         raw_response={"message": deepcopy(message), "run_cli_fixture": True},
+        finish_reason=finish_reason,
     )
 
 
@@ -154,6 +160,22 @@ def _metadata(runs_dir: Path, run_id: str) -> dict[str, Any]:
 
     path = runs_dir / run_id / "metadata.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _fixed_operational_provenance(_: Path) -> dict[str, Any]:
+    """Return deterministic repository and host metadata for CLI runs."""
+
+    return {
+        "code": {
+            "capture_status": "captured",
+            "git_revision": "fixture-revision",
+            "git_dirty": False,
+        },
+        "execution_host": {
+            "capture_scope": "python_process",
+            "snapshot_id": "fixture-host",
+        },
+    }
 
 
 def test_run_parser_exposes_scenario_output_and_sampling_configuration(
@@ -233,6 +255,7 @@ def test_run_command_persists_completed_episode_before_zero_exit(
         args,
         write_line=output.append,
         client_factory=lambda _: provider,
+        operational_provenance_factory=_fixed_operational_provenance,
     )
 
     run_directory = (runs_dir / "completed-cli-001").resolve()
@@ -249,6 +272,9 @@ def test_run_command_persists_completed_episode_before_zero_exit(
         "options": {"seed": 23, "temperature": 0.2},
         "think": "low",
     }
+    assert metadata["operational_provenance"] == _fixed_operational_provenance(
+        SCENARIO_PATH.parent
+    )
     assert provider.calls[0]["options"] == {"seed": 23, "temperature": 0.2}
     assert provider.calls[0]["think"] == "low"
 
@@ -269,6 +295,7 @@ def test_run_command_persists_incomplete_episode_before_exit_two(
         _run_args(runs_dir, run_id="incomplete-cli-001"),
         write_line=output.append,
         client_factory=lambda _: provider,
+        operational_provenance_factory=_fixed_operational_provenance,
     )
 
     assert exit_code == EXIT_INCOMPLETE
@@ -285,6 +312,53 @@ def test_run_command_persists_incomplete_episode_before_exit_two(
     assert len(automatic_lines) == 17
 
 
+def test_run_command_persists_length_truncation_before_exit_two(
+    tmp_path: Path,
+) -> None:
+    """A token-limited response closes as incomplete without dispatching calls."""
+
+    provider = ScriptedRunClient(
+        [
+            _response(
+                tool_calls=[_tool_call("send_email", {"to": "partial.test"})],
+                finish_reason="length",
+            )
+        ]
+    )
+    runs_dir = tmp_path / "runs"
+    output: list[str] = []
+
+    exit_code = run_scenario(
+        _run_args(runs_dir, run_id="truncated-cli-001"),
+        write_line=output.append,
+        client_factory=lambda _: provider,
+        operational_provenance_factory=_fixed_operational_provenance,
+    )
+
+    assert exit_code == EXIT_INCOMPLETE
+    assert provider.closed is True
+    assert output[0] == (
+        "run> truncated-cli-001: incomplete (provider_output_truncated)"
+    )
+    metadata = _metadata(runs_dir, "truncated-cli-001")
+    assert metadata["terminal"] == {
+        "error": None,
+        "status": "incomplete",
+        "termination_reason": "provider_output_truncated",
+    }
+    assert metadata["counts"]["ordinary_tool_attempts"] == 0
+    assert metadata["counts"]["tool_executions"] == 0
+    journal_path = runs_dir / "truncated-cli-001" / "journal.jsonl"
+    journal = [
+        json.loads(line)
+        for line in journal_path.read_text(encoding="utf-8").splitlines()
+    ]
+    provider_response = next(
+        row for row in journal if row["event_type"] == "provider_response"
+    )
+    assert provider_response["payload"]["finish_reason"] == "length"
+
+
 def test_run_command_persists_failed_episode_before_exit_three(
     tmp_path: Path,
 ) -> None:
@@ -298,6 +372,7 @@ def test_run_command_persists_failed_episode_before_exit_three(
         _run_args(runs_dir, run_id="failed-cli-001"),
         write_line=output.append,
         client_factory=lambda _: provider,
+        operational_provenance_factory=_fixed_operational_provenance,
     )
 
     assert exit_code == EXIT_FAILED
@@ -322,6 +397,7 @@ def test_run_command_persists_provider_interrupt_before_exit_130(
         _run_args(runs_dir, run_id="interrupted-cli-001"),
         write_line=lambda _: None,
         client_factory=lambda _: provider,
+        operational_provenance_factory=_fixed_operational_provenance,
     )
 
     assert exit_code == EXIT_INTERRUPTED
@@ -352,6 +428,7 @@ def test_run_command_checks_existing_destination_before_provider_creation(
         run_scenario(
             _run_args(runs_dir, run_id="existing-cli-001"),
             client_factory=unexpected_provider_factory,
+            operational_provenance_factory=_fixed_operational_provenance,
         )
 
     assert factory_called is False

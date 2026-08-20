@@ -62,6 +62,7 @@ class StubProvider:
         return ProviderResponse(
             message=message,
             raw_response={"message": message, "provider_field": 1},
+            finish_reason="complete",
         )
 
 

@@ -117,6 +117,7 @@ def _response(
     return ProviderResponse(
         message=message,
         raw_response={"message": deepcopy(message), "fixture": True},
+        finish_reason="complete",
     )
 
 
