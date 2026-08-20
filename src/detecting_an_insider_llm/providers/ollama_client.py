@@ -371,9 +371,11 @@ def _normalized_finish_reason(
     """Translate Ollama completion evidence without guessing a normal stop.
 
     Non-streaming chat requests are complete only when Ollama explicitly marks
-    the response done. A missing or future ``done_reason`` remains ``unknown``
-    so the experimental runner can preserve the response without executing a
-    possibly partial tool call or accepting a final answer.
+    the response done. Ollama Cloud may use ``tool_calls`` instead of ``stop``
+    for a completed assistant tool-call turn; accept it only when the message
+    contains a nonempty tool-call list. A missing, incoherent, or future reason
+    remains ``unknown`` so the runner preserves the response without executing
+    a possibly partial tool call or accepting a final answer.
     """
 
     if raw_response.get("done") is not True:
@@ -381,6 +383,13 @@ def _normalized_finish_reason(
     done_reason = raw_response.get("done_reason")
     if done_reason == "stop":
         return "complete"
+    if done_reason == "tool_calls":
+        message = raw_response.get("message")
+        if isinstance(message, Mapping):
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                return "complete"
+        return "unknown"
     if done_reason == "length":
         return "length"
     return "unknown"

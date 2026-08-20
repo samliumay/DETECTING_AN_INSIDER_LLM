@@ -108,6 +108,7 @@ def test_chat_sends_non_streaming_payload_and_normalizes_response(
     ("done", "done_reason", "expected"),
     [
         (True, "length", "length"),
+        (True, "tool_calls", "unknown"),
         (True, "future_reason", "unknown"),
         (True, None, "unknown"),
         (False, "stop", "unknown"),
@@ -140,6 +141,73 @@ def test_chat_normalizes_nonstandard_finish_reasons_without_guessing_completion(
     result = client.chat([{"role": "user", "content": "hello"}])
 
     assert result.finish_reason == expected
+    assert result.raw_response == response_body
+    session.close()
+
+
+def test_chat_accepts_completed_cloud_tool_call_finish_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A coherent cloud tool-call stop is complete and safe to dispatch."""
+
+    session = requests.Session()
+    response_body = {
+        "model": "test-model:cloud",
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {"name": "list_emails", "arguments": {}},
+                }
+            ],
+        },
+        "done": True,
+        "done_reason": "tool_calls",
+    }
+    monkeypatch.setattr(
+        session,
+        "request",
+        lambda *_args, **_kwargs: StubResponse(response_body),
+    )
+    client = OllamaClient(model="test-model:cloud", session=session)
+
+    result = client.chat([{"role": "user", "content": "list mail"}])
+
+    assert result.finish_reason == "complete"
+    assert result.raw_response == response_body
+    session.close()
+
+
+@pytest.mark.parametrize("tool_calls", [[], "not-a-list"])
+def test_chat_rejects_incoherent_cloud_tool_call_finish_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_calls: object,
+) -> None:
+    """A cloud stop reason cannot invent tool calls absent from its message."""
+
+    session = requests.Session()
+    response_body = {
+        "model": "test-model:cloud",
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": tool_calls,
+        },
+        "done": True,
+        "done_reason": "tool_calls",
+    }
+    monkeypatch.setattr(
+        session,
+        "request",
+        lambda *_args, **_kwargs: StubResponse(response_body),
+    )
+    client = OllamaClient(model="test-model:cloud", session=session)
+
+    result = client.chat([{"role": "user", "content": "list mail"}])
+
+    assert result.finish_reason == "unknown"
     assert result.raw_response == response_body
     session.close()
 
