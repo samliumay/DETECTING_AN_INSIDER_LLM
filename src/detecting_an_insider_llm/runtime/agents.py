@@ -11,7 +11,7 @@ The basic :meth:`Agent.run` method still performs one provider turn.  The
 separate :meth:`Agent.run_with_tools` path coordinates a bounded multi-turn loop
 through an injected allowlisted executor.  Parsing and tool-result construction
 live in :mod:`detecting_an_insider_llm.runtime.tool_loop`; concrete email dispatch
-lives in the tools package.  Automatic durable logging remains a later layer.
+lives in the tools package.  Durable artifact persistence remains a later layer.
 """
 
 from collections.abc import Mapping, Sequence
@@ -75,8 +75,9 @@ class ToolLoopResult:
         termination_reason: `completed` for a normal assistant answer or
             `max_tool_rounds` when further requested calls were rejected.
 
-    This result is not a durable research artifact.  A later runner must write
-    it, together with provider failures and scenario metadata, to the run journal.
+    This result is not a durable research artifact.  The non-interactive runner
+    uses a stricter episode result, and a later artifact writer must preserve
+    that result in the run journal.
     """
 
     last_response: ProviderResponse
@@ -109,7 +110,7 @@ class ToolLoopProviderError(RuntimeError):
 
         super().__init__(str(provider_error))
         self.provider_responses = tuple(
-            _copy_provider_response(response) for response in provider_responses
+            copy_provider_response(response) for response in provider_responses
         )
         self.tool_executions = tuple(deepcopy(tool_executions))
 
@@ -176,7 +177,8 @@ class Agent:
     :meth:`run` performs exactly one provider call and preserves returned tool
     calls without executing them. :meth:`run_with_tools` adds bounded execution
     while keeping the allowlist outside this class.  Neither path writes durable
-    logs; the future experiment runner remains responsible for persistence.
+    logs; the scenario runner handles isolated experiment orchestration, while
+    the future artifact writer remains responsible for persistence.
     """
 
     def __init__(
@@ -254,7 +256,7 @@ class Agent:
             options=deepcopy(self._options),
             think=self._think,
         )
-        assistant_message = _validated_assistant_message(response)
+        assistant_message = validated_assistant_message(response)
 
         # This is the only state commit in the method.
         self._messages = [*request_messages, assistant_message]
@@ -320,7 +322,7 @@ class Agent:
                     options=deepcopy(self._options),
                     think=self._think,
                 )
-                assistant_message = _validated_assistant_message(response)
+                assistant_message = validated_assistant_message(response)
             except Exception as exc:
                 # Before any action, the normal one-turn transactional behavior
                 # remains intact and callers receive their provider's exception.
@@ -332,7 +334,7 @@ class Agent:
                     tool_executions=tool_executions,
                 ) from exc
 
-            copied_response = _copy_provider_response(response)
+            copied_response = copy_provider_response(response)
             provider_responses.append(copied_response)
             working_messages.append(assistant_message)
             raw_tool_calls = assistant_message.get("tool_calls")
@@ -397,7 +399,7 @@ class Agent:
         return [{"role": "system", "content": self._system_prompt}]
 
 
-def _validated_assistant_message(response: ProviderResponse) -> Message:
+def validated_assistant_message(response: ProviderResponse) -> Message:
     """Validate the cross-provider fields required for conversation history.
 
     Provider-specific fields are preserved. Only the invariants needed by the
@@ -428,7 +430,7 @@ def _validated_assistant_message(response: ProviderResponse) -> Message:
     return deepcopy(message)
 
 
-def _copy_provider_response(response: ProviderResponse) -> ProviderResponse:
+def copy_provider_response(response: ProviderResponse) -> ProviderResponse:
     """Return a defensive copy of both normalized and raw provider evidence.
 
     The dataclass itself is frozen, but its dictionaries are not.  Copying at

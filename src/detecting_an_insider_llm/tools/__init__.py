@@ -2,7 +2,7 @@
 
 Importing this package only defines schemas and classes.  It does not register
 tools with an agent, execute a provider response, or create global mailbox
-state.  Runtime integration will therefore remain an explicit later step.
+state.  Runtime integration therefore remains explicit and episode-scoped.
 """
 
 from detecting_an_insider_llm.runtime.tool_loop import ToolExecutionResult

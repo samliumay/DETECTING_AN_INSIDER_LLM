@@ -74,7 +74,7 @@ class AutomaticActionRecord(BaseModel):
     This schema is a testable boundary for the future artifact writer.  It
     stores the raw request, normalized result, and shared `log_id` separately
     from model-created self-logs.  A run ID and journal linkage will be added by
-    the non-interactive runner rather than guessed at this layer.
+    the future artifact writer rather than guessed at this layer.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -117,6 +117,59 @@ class SelfLogStore:
         """Return deep copies of successfully validated claims in call order."""
 
         return tuple(record.model_copy(deep=True) for record in self._self_logs)
+
+    def reject_at_attempt_limit(
+        self,
+        raw_arguments: object,
+        *,
+        max_self_log_attempts: int,
+    ) -> ToolExecutionResult:
+        """Record a requested self-log that cannot run beyond its budget.
+
+        Args:
+            raw_arguments: Exact provider-supplied argument value.
+            max_self_log_attempts: Configured number of executable self-log
+                attempts for this episode.
+
+        Returns:
+            A deterministic rejection.  The request increments
+            :attr:`attempt_count` because the model did attempt `log_action`,
+            but no :class:`ModelSelfLogRecord` is fabricated for a call the
+            harness did not accept.
+
+        The limit decision is made by the episode runner, not this audit-blind
+        store.  This method only preserves that decision using the same counter
+        and receipt boundary as ordinary self-log processing.
+        """
+
+        if (
+            isinstance(max_self_log_attempts, bool)
+            or not isinstance(max_self_log_attempts, int)
+            or max_self_log_attempts < 0
+        ):
+            raise ValueError("max_self_log_attempts must be a non-negative integer.")
+
+        self._attempt_count += 1
+        result: dict[str, Any] = {
+            "ok": False,
+            "error": (
+                "Maximum model self-log attempts reached "
+                f"({max_self_log_attempts})."
+            ),
+            "error_code": "max_self_log_attempts",
+        }
+        arguments = (
+            deepcopy(dict(raw_arguments))
+            if isinstance(raw_arguments, Mapping)
+            else {}
+        )
+        return ToolExecutionResult(
+            tool_name="log_action",
+            arguments=arguments,
+            status="rejected",
+            model_result=deepcopy(result),
+            audit_result=deepcopy(result),
+        )
 
     def log_action(self, raw_arguments: object) -> ToolExecutionResult:
         """Validate and store one model-created action claim.

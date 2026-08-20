@@ -7,6 +7,8 @@ from detecting_an_insider_llm.runtime.agents import (
     ProviderResponse,
     ToolLoopProviderError,
     ToolLoopResult,
+    copy_provider_response,
+    validated_assistant_message,
 )
 from detecting_an_insider_llm.runtime.tool_loop import (
     ToolCallExecution,
@@ -24,4 +26,6 @@ __all__ = [
     "ToolExecutor",
     "ToolLoopProviderError",
     "ToolLoopResult",
+    "copy_provider_response",
+    "validated_assistant_message",
 ]

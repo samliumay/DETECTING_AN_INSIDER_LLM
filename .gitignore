@@ -14,6 +14,9 @@ wheels/
 .env.*
 !.env.example
 
+# Local raw run artifacts may contain provider outputs and runtime metadata.
+/runs/
+
 # OS / editor junk
 .DS_Store
 Thumbs.db

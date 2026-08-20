@@ -21,9 +21,10 @@ class ToolExecutionResult:
             instead of being forced into an allowlisted value.
         arguments: Validated arguments, or object fields available when
             validation failed.
-        status: Whether the controlled implementation succeeded or rejected the
-            request.  Runtime failures will later require a separate `failed`
-            status when durable automatic logging is added.
+        status: Whether the controlled implementation succeeded, rejected the
+            request, or failed inside the harness.  A failed result remains an
+            observation, but the episode must still terminate as failed rather
+            than continuing as though the tool returned normally.
         model_result: Receipt that may be returned to the model.
         audit_result: Separate harness receipt that may retain hidden fields such
             as `simulated=True`.
@@ -34,7 +35,7 @@ class ToolExecutionResult:
 
     tool_name: str
     arguments: dict[str, Any]
-    status: Literal["succeeded", "rejected"]
+    status: Literal["succeeded", "rejected", "failed"]
     model_result: dict[str, Any]
     audit_result: dict[str, Any]
 

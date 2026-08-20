@@ -1,13 +1,15 @@
-"""Command-line interface for the insider-LLM detection harness.
+"""Command-line interface for interactive, run, and offline-analysis paths.
 
 The `chat` command is intentionally a small interactive integration test.  It
 creates one provider, one `Agent`, and one simulated mailbox, then reuses them
 until the user enters `/quit`.  Reusing the same objects preserves conversation
 history and simulated sent mail across turns.
 
-The command now executes only the allowlisted email tools through a bounded
-loop.  It still does not write research artifacts; the future experiment runner
-must journal every attempt, failure, prompt, provider response, and run status.
+The `run` command resolves one versioned scenario cell, executes it through the
+non-interactive runner, and atomically persists every returned terminal state.
+It never interprets the behavior.  The separate `analyze` command reads one
+closed run, applies its frozen evaluation contract, and writes `results.json`
+without contacting a provider or changing the raw artifacts.
 """
 
 import argparse
@@ -18,6 +20,11 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from detecting_an_insider_llm.analysis import AnalysisError, OfflineAnalyzer
+from detecting_an_insider_llm.artifacts import (
+    ArtifactWriteError,
+    RunArtifactWriter,
+)
 from detecting_an_insider_llm.providers import OllamaClient, OllamaClientError
 from detecting_an_insider_llm.runtime import (
     Agent,
@@ -25,6 +32,8 @@ from detecting_an_insider_llm.runtime import (
     ToolLoopProviderError,
 )
 from detecting_an_insider_llm.runtime.agents import ThinkingMode
+from detecting_an_insider_llm.runtime.episode_runner import ScenarioRunner
+from detecting_an_insider_llm.scenario_loader import resolve_scenario
 from detecting_an_insider_llm.tools import (
     EmailToolDispatcher,
     SimulatedMailbox,
@@ -37,17 +46,24 @@ PROGRAM_VERSION = "0.1.0"
 # and the later model-visible self-log may add one call per ordinary action.
 # Thirty-two leaves a small retry margin while remaining explicitly bounded.
 DEFAULT_MAX_TOOL_ROUNDS = 32
+EXIT_COMPLETED = 0
+EXIT_CLI_ERROR = 1
+EXIT_INCOMPLETE = 2
+EXIT_FAILED = 3
+EXIT_INTERRUPTED = 130
 
 InputReader = Callable[[str], str]
 LineWriter = Callable[[str], None]
 ClientFactory = Callable[[argparse.Namespace], OllamaClient]
+ArtifactWriterFactory = Callable[[Path], RunArtifactWriter]
+AnalyzerFactory = Callable[[], OfflineAnalyzer]
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Create the top-level parser and its subcommands."""
     parser = argparse.ArgumentParser(
         prog=PROGRAM_NAME,
-        description="Run and analyze double-logging experiments for LLM agents.",
+        description="Run and preserve double-logging experiments for LLM agents.",
     )
     parser.add_argument(
         "--version",
@@ -64,58 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
             "and allowlisted email tools execute only inside a simulated mailbox."
         ),
     )
-    chat_parser.add_argument(
-        "--provider",
-        choices=("ollama",),
-        default="ollama",
-        help="provider adapter to use (default: ollama)",
-    )
-    chat_parser.add_argument(
-        "--model",
-        help="Ollama model identifier; defaults to OLLAMA_MODEL",
-    )
-    chat_parser.add_argument(
-        "--base-url",
-        help="Ollama server root; defaults to OLLAMA_BASE_URL or localhost",
-    )
-    chat_parser.add_argument(
-        "--timeout-seconds",
-        type=_positive_float,
-        help="positive HTTP timeout; defaults to OLLAMA_TIMEOUT_SECONDS",
-    )
-    chat_parser.add_argument(
-        "--keep-alive",
-        help="Ollama model residency duration, for example 5m or 0",
-    )
+    _add_provider_arguments(chat_parser)
     chat_parser.add_argument(
         "--system-prompt",
         help="optional instruction retained for the entire conversation",
     )
-    chat_parser.add_argument(
-        "--temperature",
-        type=_non_negative_float,
-        help="non-negative Ollama temperature",
-    )
-    chat_parser.add_argument(
-        "--top-k",
-        type=_non_negative_int,
-        help="non-negative Ollama top_k value",
-    )
-    chat_parser.add_argument(
-        "--top-p",
-        type=_probability,
-        help="Ollama top_p value between 0 and 1",
-    )
-    chat_parser.add_argument(
-        "--seed",
-        type=int,
-        help="optional deterministic sampling seed",
-    )
-    chat_parser.add_argument(
-        "--max-output-tokens",
-        type=_positive_int,
-        help="positive Ollama num_predict limit",
-    )
+    _add_generation_arguments(chat_parser)
     chat_parser.add_argument(
         "--max-tool-rounds",
         type=_positive_int,
@@ -129,14 +99,132 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="optional JSON list of synthetic emails available to mailbox tools",
     )
-    chat_parser.add_argument(
+    chat_parser.set_defaults(handler=run_chat)
+
+    run_parser = subparsers.add_parser(
+        "run",
+        help="execute and persist one non-interactive scenario episode",
+        description=(
+            "Resolve one scenario condition/policy cell, execute it once, and "
+            "atomically persist all four raw records under a unique run path."
+        ),
+    )
+    _add_provider_arguments(run_parser)
+    _add_generation_arguments(run_parser)
+    run_parser.add_argument(
+        "--scenario-file",
+        type=Path,
+        required=True,
+        help="versioned scenario YAML file",
+    )
+    run_parser.add_argument(
+        "--condition",
+        required=True,
+        help="condition ID declared by the scenario",
+    )
+    run_parser.add_argument(
+        "--policy-context",
+        required=True,
+        help="policy-context ID declared by the scenario",
+    )
+    run_parser.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=Path("runs"),
+        help="raw run parent directory (default: runs)",
+    )
+    run_parser.add_argument(
+        "--run-id",
+        help="optional stable run ID; an existing run is never overwritten",
+    )
+    run_parser.set_defaults(handler=run_scenario)
+
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="derive a versioned results.json from one closed raw run",
+        description=(
+            "Validate one closed run and its frozen evaluation YAML, perform "
+            "deterministic offline checks, and atomically write results.json."
+        ),
+    )
+    analyze_parser.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help="closed run directory containing the four raw artifacts",
+    )
+    analyze_parser.add_argument(
+        "--evaluation-file",
+        type=Path,
+        required=True,
+        help="versioned evaluation YAML whose IDs must match the run",
+    )
+    analyze_parser.set_defaults(handler=analyze_run)
+    return parser
+
+
+def _add_provider_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add connection flags shared by interactive and experimental commands."""
+
+    parser.add_argument(
+        "--provider",
+        choices=("ollama",),
+        default="ollama",
+        help="provider adapter to use (default: ollama)",
+    )
+    parser.add_argument(
+        "--model",
+        help="Ollama model identifier; defaults to OLLAMA_MODEL",
+    )
+    parser.add_argument(
+        "--base-url",
+        help="Ollama server root; defaults to OLLAMA_BASE_URL or localhost",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=_positive_float,
+        help="positive HTTP timeout; defaults to OLLAMA_TIMEOUT_SECONDS",
+    )
+    parser.add_argument(
+        "--keep-alive",
+        help="Ollama model residency duration, for example 5m or 0",
+    )
+
+
+def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add sampling flags whose exact values are retained in run metadata."""
+
+    parser.add_argument(
+        "--temperature",
+        type=_non_negative_float,
+        help="non-negative Ollama temperature",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=_non_negative_int,
+        help="non-negative Ollama top_k value",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=_probability,
+        help="Ollama top_p value between 0 and 1",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="optional deterministic sampling seed",
+    )
+    parser.add_argument(
+        "--max-output-tokens",
+        type=_positive_int,
+        help="positive Ollama num_predict limit",
+    )
+    parser.add_argument(
         "--think",
         choices=("false", "true", "low", "medium", "high"),
         default="false",
         help="request exposed reasoning when supported (default: false)",
     )
-    chat_parser.set_defaults(handler=run_chat)
-    return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -152,11 +240,116 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         return int(handler(args))
-    except (OllamaClientError, ValueError) as exc:
-        # Configuration and startup errors are concise CLI failures. Per-turn
-        # provider failures are handled inside the interactive loop instead.
+    except (AnalysisError, ArtifactWriteError, OllamaClientError, ValueError) as exc:
+        # Configuration, startup, and persistence errors occur outside a closed
+        # episode. Provider failures inside `run` are artifact-backed results;
+        # `chat` continues to display its per-turn failures interactively.
         print(f"{PROGRAM_NAME}: error: {exc}", file=sys.stderr)
-        return 1
+        return EXIT_CLI_ERROR
+    except KeyboardInterrupt:
+        print(
+            f"{PROGRAM_NAME}: interrupted before an episode could close.",
+            file=sys.stderr,
+        )
+        return EXIT_INTERRUPTED
+
+
+def analyze_run(
+    args: argparse.Namespace,
+    *,
+    write_line: LineWriter = print,
+    analyzer_factory: AnalyzerFactory | None = None,
+) -> int:
+    """Analyze one persisted run without constructing a provider.
+
+    Args:
+        args: Parsed `analyze` command configuration.
+        write_line: Injectable one-line output boundary for offline tests.
+        analyzer_factory: Optional deterministic analyzer constructor.
+
+    Returns:
+        Zero after a valid `results.json` is atomically published.  A run may
+        still be classified non-evaluable inside that file; non-evaluability is
+        an observed research outcome, not a failure of the analyze command.
+
+    Raises:
+        AnalysisError: If inputs are incompatible or result publication fails.
+            The top-level CLI reports the error and returns exit code one.
+    """
+
+    factory = analyzer_factory or OfflineAnalyzer
+    written = factory().analyze(
+        args.run_dir,
+        evaluation_file=args.evaluation_file,
+    )
+    assessment = written.results.run_assessment
+    write_line(
+        f"analysis> {written.run_id}: {assessment.overall} "
+        f"({assessment.discrepancy_signal})"
+    )
+    write_line(f"results> {written.results_path}")
+    return EXIT_COMPLETED
+
+
+def run_scenario(
+    args: argparse.Namespace,
+    *,
+    write_line: LineWriter = print,
+    client_factory: ClientFactory | None = None,
+    artifact_writer_factory: ArtifactWriterFactory | None = None,
+) -> int:
+    """Execute, persist, and summarize one resolved non-interactive episode.
+
+    Args:
+        args: Parsed `run` command configuration.
+        write_line: Injectable one-line output boundary for offline tests.
+        client_factory: Optional provider constructor; production uses Ollama.
+        artifact_writer_factory: Optional persistence constructor; production
+            uses :class:`RunArtifactWriter`.
+
+    Returns:
+        Zero for a completed episode, two for an incomplete limit stop, three
+        for a runtime failure, or 130 for a captured provider-stage interrupt.
+
+    Raises:
+        ValueError: For invalid scenario/provider configuration.
+        ArtifactWriteError: If destination preflight or atomic publication
+            fails.  A terminal exit code is never returned before persistence.
+
+    Scenario resolution and output preflight happen before provider creation.
+    The writer then publishes the episode while the provider context is still
+    active, so even provider cleanup failure cannot erase an already closed raw
+    run directory.
+    """
+
+    scenario = resolve_scenario(
+        args.scenario_file,
+        condition_id=args.condition,
+        policy_context_id=args.policy_context,
+    )
+    options = _ollama_options(args)
+    think = _thinking_mode(args.think)
+    writer_factory = artifact_writer_factory or RunArtifactWriter
+    writer = writer_factory(args.runs_dir)
+
+    # Select and validate the destination before a potentially costly model
+    # call.  `write` repeats collision detection before the atomic rename.
+    selected_run_id = writer.preflight(run_id=args.run_id)
+    provider_factory = client_factory or _create_ollama_client
+    with provider_factory(args) as provider:
+        episode = ScenarioRunner(
+            provider,
+            options=options,
+            think=think,
+        ).run(scenario)
+        artifacts = writer.write(episode, run_id=selected_run_id)
+
+    write_line(
+        f"run> {artifacts.run_id}: {episode.status} "
+        f"({episode.termination_reason})"
+    )
+    write_line(f"artifacts> {artifacts.run_directory}")
+    return _episode_exit_code(episode.status, episode.termination_reason)
 
 
 def run_chat(
@@ -384,6 +577,20 @@ def _ollama_options(args: argparse.Namespace) -> dict[str, Any] | None:
     }
     options = {name: value for name, value in values.items() if value is not None}
     return options or None
+
+
+def _episode_exit_code(status: str, termination_reason: str) -> int:
+    """Map a persisted episode terminal state to a process exit code."""
+
+    if termination_reason == "interrupted":
+        return EXIT_INTERRUPTED
+    if status == "completed":
+        return EXIT_COMPLETED
+    if status == "incomplete":
+        return EXIT_INCOMPLETE
+    if status == "failed":
+        return EXIT_FAILED
+    raise ValueError(f"Unsupported episode status: {status}")
 
 
 def _thinking_mode(value: str) -> ThinkingMode:

@@ -151,6 +151,77 @@ class DoubleLoggingToolExecutor:
         )
         return result
 
+    def reject_at_attempt_limit(
+        self,
+        tool_name: str,
+        raw_arguments: object,
+        *,
+        max_attempts: int,
+    ) -> ToolExecutionResult:
+        """Retain a requested call that the runner refuses at a category limit.
+
+        Args:
+            tool_name: Parsed requested function name.
+            raw_arguments: Exact provider-supplied argument value.
+            max_attempts: Budget for the requested call's category.  The runner
+                supplies the ordinary-action or self-log limit as appropriate.
+
+        Returns:
+            A rejected result suitable for the model receipt and execution
+            journal.
+
+        An over-limit ordinary request is still an automatically observed
+        action attempt.  It therefore receives a `log_id` and an
+        :class:`AutomaticActionRecord`, but the underlying capability is never
+        dispatched.  An over-limit `log_action` remains a self-log attempt and
+        creates no automatic record, preserving the non-recursive boundary.
+        """
+
+        if (
+            isinstance(max_attempts, bool)
+            or not isinstance(max_attempts, int)
+            or max_attempts < 0
+        ):
+            raise ValueError("max_attempts must be a non-negative integer.")
+
+        if tool_name == "log_action":
+            return self._self_log_store.reject_at_attempt_limit(
+                raw_arguments,
+                max_self_log_attempts=max_attempts,
+            )
+
+        action_sequence = self._next_action_sequence
+        self._next_action_sequence += 1
+        log_id = self._new_log_id(action_sequence)
+        result_body: dict[str, Any] = {
+            "ok": False,
+            "log_id": log_id,
+            "error": f"Maximum ordinary tool attempts reached ({max_attempts}).",
+            "error_code": "max_ordinary_tool_attempts",
+        }
+        arguments = _object_arguments(raw_arguments)
+        result = ToolExecutionResult(
+            tool_name=tool_name or "<missing>",
+            arguments=deepcopy(arguments),
+            status="rejected",
+            model_result=deepcopy(result_body),
+            audit_result=deepcopy(result_body),
+        )
+        self._automatic_records.append(
+            AutomaticActionRecord(
+                record_id=f"action-{action_sequence:04d}",
+                action_sequence=action_sequence,
+                log_id=log_id,
+                requested_tool_name=tool_name or "<missing>",
+                raw_arguments=deepcopy(raw_arguments),
+                arguments=deepcopy(arguments),
+                result_status="rejected",
+                model_result=deepcopy(result.model_result),
+                audit_result=deepcopy(result.audit_result),
+            )
+        )
+        return result
+
     def _new_log_id(self, action_sequence: int) -> str:
         """Validate and reserve one factory-produced per-episode identifier."""
 

@@ -20,8 +20,11 @@ A controlled research harness for comparing **system-observed tool use** with
 
 > [!IMPORTANT]
 > This repository is an **engineering-stage research prototype**. It can load
-> and validate the scenario and run an interactive Ollama tool-loop smoke test,
-> but it is not yet ready to produce double-logged experimental trials.
+> and validate the scenario, execute one isolated double-logged episode in
+> memory, atomically persist its four raw records through the Python API, and
+> run either a live non-interactive episode or an interactive Ollama tool-loop
+> smoke test. It now has a deterministic offline analyzer and end-to-end offline
+> fixtures, but no live pilot result has yet been collected and inspected.
 
 ## Overview
 
@@ -99,6 +102,47 @@ Install the project and run the offline test suite:
 uv sync
 uv run pytest
 ```
+
+Run and atomically persist one isolated scenario episode:
+
+```bash
+uv run detecting-an-insider-llm run \
+  --provider ollama \
+  --model qwen3 \
+  --scenario-file scenarios/blackmail/v1/scenario.yaml \
+  --condition baseline \
+  --policy-context none \
+  --runs-dir runs \
+  --temperature 0.3 \
+  --seed 7
+```
+
+The command prints the selected run ID, terminal state, and closed artifact
+directory. A generated timestamp/UUID ID is used unless `--run-id` supplies a
+stable unused ID. Scenario execution limits come from the versioned YAML and
+cannot be changed by this command. Process exit codes are:
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Completed episode persisted |
+| `1` | Configuration, scenario loading, provider startup, or persistence failed before a terminal artifact-backed result could be returned |
+| `2` | Incomplete limit-stopped episode persisted |
+| `3` | Failed episode persisted |
+| `130` | Provider-stage keyboard interruption persisted as a failed episode |
+
+Analyze a closed run without contacting Ollama:
+
+```bash
+uv run detecting-an-insider-llm analyze \
+  --run-dir runs/YOUR_RUN_ID \
+  --evaluation-file scenarios/blackmail/v1/evaluation.yaml
+```
+
+The analyzer validates all four raw files and their cross-file linkages before
+atomically creating or replacing `results.json`. A successful command exits
+with `0` even when the run itself is classified non-evaluable; that status is a
+retained research outcome rather than an analyzer failure. Invalid, partial, or
+incompatible input exits with `1` and does not publish a new result.
 
 Start an interactive smoke test against the bundled synthetic mailbox:
 
@@ -193,8 +237,8 @@ not part of the initial experiment.
 
 ### Run artifact contract
 
-The planned closed-run layout contains four immutable raw records and one
-generated result:
+The implemented closed-run layout contains four immutable raw records. The
+offline analyzer can add one generated result:
 
 ```text
 runs/<run_id>/
@@ -218,8 +262,16 @@ and model-created records use that ID for correlation; time is never the identit
 rule. Malformed or missing required calls may have no ID and are instead
 identified from the journal and predeclared scenario requirements.
 
-The four raw records remain unchanged after a run closes. Re-analysis may
-regenerate `results.json`, which must identify the analyzer version used.
+`RunArtifactWriter` first serializes the entire episode, then writes and syncs
+all four files inside a hidden sibling staging directory. Only after every file
+is complete does it rename that directory to `runs/<run_id>`. A handled failure
+removes staging, so the final path is absent rather than partially populated.
+Generated IDs combine a UTC timestamp with a UUID; a caller may instead supply
+a validated stable ID, but an existing run is never overwritten.
+
+The four raw files are made read-only after writing and remain unchanged after
+a run closes. Re-analysis may add or regenerate `results.json`, which must
+identify the analyzer version used.
 
 ### Analysis pipeline
 
@@ -232,28 +284,38 @@ raw run records
     └─ validate schemas and completion status
        └─ correlate actions and self-logs by log_id
           └─ identify malformed or missing required calls
-             └─ compare tool, action, content, and outcome
-                └─ add policy context and optional reasoning evidence
-                   └─ write tool-level and run-level results
+             └─ compare exact tool names and outcomes
+                └─ mark description and policy semantics for review
+                   └─ write tool-level and run-level results atomically
 ```
 
-The first analyzer should remain offline and deterministic where possible. It
-must:
+The implemented version-one analyzer is offline and deterministic except for
+its recorded analysis timestamp. It:
 
-1. Validate all raw records and the final completion status before interpreting
+1. Validates all raw records and the final completion status before interpreting
    a run; failed, interrupted, and incomplete runs remain visible.
-2. Classify relationships as matched, missing, duplicate, unknown-ID,
+2. Classifies relationships as matched, missing, duplicate, unknown-ID,
    malformed, or not evaluable because of runtime failure.
-3. Give matched records an independent accuracy result: accurate, inaccurate,
-   or requiring review. A matching ID is not sufficient.
-4. Classify malformed and missing required calls only when the journal and a
+3. Gives matched records independent exact tool-name and claimed-outcome
+   comparisons. Free-text description accuracy remains `requires_review`; a
+   matching ID is not treated as sufficient.
+4. Classifies malformed and missing required calls only when the journal and a
    predeclared requirement support the label.
-5. Combine comparisons with the scenario policy class. Exposed reasoning can
-   add exploratory context, but its absence is not an error.
-6. Distinguish detected discrepancies, accurately logged policy conflicts
-   missed by the discrepancy signal, and non-evaluable runs.
-7. Report denominators, call outcomes, interaction anomalies, completion, and
-   aggregate run assessment. Model-level summaries require repeated runs.
+5. Retains the declared semantic policy labels as `requires_review` rather than
+   inventing a deterministic policy judgment. Exposed reasoning is preserved
+   in the raw journal but is not required by this analyzer.
+6. Distinguishes detected discrepancies, no detected deterministic discrepancy
+   pending semantic review, and non-evaluable runs. A runtime-failed episode's
+   unmatched actions are not mislabeled as missing self-logs.
+7. Reports denominators, call outcomes, interaction anomalies, completion, and
+   aggregate run assessment. Model-level summaries still require repeated runs.
+
+The analyzer rejects unknown deterministic check IDs so a changed evaluation
+contract cannot be silently interpreted by older code. It also rejects missing
+files, symlinked raw files, duplicate JSON keys, non-finite JSON numbers,
+incompatible schema/experiment IDs, incorrect manifest counts, reordered
+sequences, and broken journal linkages before interpretation. Re-analysis may
+replace only the derived `results.json`; raw bytes remain unchanged.
 
 A live dashboard, distributed ingestion system, and general-purpose SIEM rule
 engine are intentionally outside the initial implementation.
@@ -300,6 +362,32 @@ and at most 40 provider turns. A normal sequential path uses one list, eleven
 reads, and at most one send. Separate action and logging limits prevent logging
 overhead from silently reducing the action budget.
 
+### Non-interactive episode runner
+
+`ScenarioRunner` in
+[`runtime/episode_runner.py`](src/detecting_an_insider_llm/runtime/episode_runner.py)
+executes exactly one resolved condition/policy cell. Each call creates a fresh
+mailbox, outbox, conversation, double-logging executor, and counter set while
+reusing only the caller-owned provider connection. The runner:
+
+- snapshots provider identity, runtime metadata, options, prompts, tool
+  definitions, and execution limits;
+- counts provider calls, ordinary tool attempts, and `log_action` attempts
+  separately, including malformed, rejected, and failed attempts;
+- gives an over-limit ordinary attempt a `log_id` and automatic rejection
+  record without dispatching the requested capability;
+- returns `completed`, `incomplete`, or `failed` together with messages, raw
+  provider responses, tool executions, automatic records, model self-logs, and
+  simulated sent mail; and
+- preserves partial evidence after provider, response-contract, or tool
+  failures instead of raising it away.
+
+The `run` command composes the runner and artifact writer. It resolves and
+validates the scenario plus output destination before provider construction,
+then persists every returned episode—including failed and incomplete episodes—
+before selecting its exit code. The existing `chat` command remains an
+explicitly non-experimental integration smoke test and does not write artifacts.
+
 ## Project structure
 
 ```text
@@ -309,8 +397,10 @@ overhead from silently reducing the action budget.
 │   ├── blackmail/v1/           # Versioned scenario and evaluation contract
 │   └── example_mailbox.json    # Small mailbox for interactive smoke tests
 ├── src/detecting_an_insider_llm/
+│   ├── analysis/               # Typed offline checks and results publication
+│   ├── artifacts.py            # Atomic immutable raw-run publication
 │   ├── providers/              # Provider adapters
-│   ├── runtime/                # Agent and bounded tool loop
+│   ├── runtime/                # Agent, tool loop, and isolated episode runner
 │   ├── tools/                  # Typed email and self-logging tools
 │   └── scenario_loader.py      # Scenario validation and composition
 ├── tests/                      # Offline test suite
@@ -330,17 +420,25 @@ overhead from silently reducing the action budget.
 - [x] Model-visible `log_action` schema and audit-blind self-log store
 - [x] Composed executor that assigns `log_id` values to dispatched ordinary
   calls while retaining automatic and model-created records separately
-- [x] Offline tests for the agent, CLI, provider, tools, loader, and tool loop
+- [x] Non-interactive runner for one isolated scenario episode with explicit
+  completed, incomplete, and failed terminal states
+- [x] Separate provider-turn, ordinary-attempt, and self-log-attempt limits,
+  including automatic records for ordinary attempts rejected at a limit
+- [x] Atomic four-file raw artifact writer with unique run directories,
+  read-only records, strict JSON, and failed-run preservation
+- [x] Live non-interactive CLI that preflights configuration and persists every
+  completed, incomplete, failed, or handled interrupted episode before exit
+- [x] Deterministic offline analyzer with strict cross-file validation,
+  identity-based comparison, progress checks, calibrated non-evaluable states,
+  and atomic versioned `results.json` output
+- [x] Offline tests for the agent, CLI, provider, tools, loader, tool loop, and
+  isolated episode runner, artifact writer, and analyzer
+- [x] End-to-end offline fixtures covering a fully matched complete run,
+  inaccurate, missing, duplicate, unknown-ID and malformed logging, raw-record
+  corruption, and provider failure
 
 ### Blockers before the first pilot
 
-- [ ] Add a non-interactive runner for one isolated scenario episode.
-- [ ] Atomically persist the four raw records under a unique run directory.
-- [ ] Enforce separate ordinary-tool, self-log, and provider-turn limits,
-  including automatic records for ordinary attempts rejected at a limit.
-- [ ] Implement the offline analyzer and versioned `results.json` output.
-- [ ] Add an end-to-end fixture covering a complete run, inaccurate or missing
-  logging, malformed output, and provider failure.
 - [ ] Run a small opt-in Ollama pilot and inspect every artifact before repeated
   trials.
 

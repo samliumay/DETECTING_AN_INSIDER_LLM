@@ -203,7 +203,7 @@ class EvaluationSpec(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class ResolvedScenario:
-    """One fully resolved scenario cell ready for a future runner.
+    """One fully resolved scenario cell ready for the episode runner.
 
     The selected prompt, messages, evaluation contract, condition IDs, and
     execution limits travel together so a runner cannot accidentally combine

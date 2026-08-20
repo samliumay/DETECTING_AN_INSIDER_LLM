@@ -13,8 +13,8 @@ variables. Explicit constructor values take precedence. Loading a particular
 must not assume a repository layout or mutate process-wide configuration.
 
 The client does not retry requests. Hidden retries would make one apparent
-provider call represent several unrecorded attempts. A future runner can add a
-bounded retry policy at the level where every attempt can be journaled.
+provider call represent several unrecorded attempts. The episode runner also
+avoids retries until a versioned policy can journal every attempt explicitly.
 """
 
 
